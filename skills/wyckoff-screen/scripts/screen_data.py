@@ -24,9 +24,10 @@ def _to_tencent_symbol(code: str) -> str:
     return f"sz{code}"
 
 
-def fetch_stock_data(code: str) -> pd.DataFrame | None:
+def fetch_stock_data(code: str, suppress: bool = True) -> pd.DataFrame | None:
     """
     获取单只股票日线数据（腾讯数据源，前复权）
+    suppress=False 时不重定向 stdout/stderr（并发取数场景，避免全局重定向线程不安全）
     返回: DataFrame（列名 date/open/close/high/low/volume/amount，wyckoff_engine 可自动识别）
     """
     code = str(code).strip()
@@ -37,7 +38,10 @@ def fetch_stock_data(code: str) -> pd.DataFrame | None:
         symbol = _to_tencent_symbol(code)
         start = (datetime.now() - timedelta(days=600)).strftime("%Y%m%d")
         end = datetime.now().strftime("%Y%m%d")
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        if suppress:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                df = ak.stock_zh_a_hist_tx(symbol=symbol, start_date=start, end_date=end, adjust="qfq")
+        else:
             df = ak.stock_zh_a_hist_tx(symbol=symbol, start_date=start, end_date=end, adjust="qfq")
         if df is not None and len(df) >= 60:
             return df

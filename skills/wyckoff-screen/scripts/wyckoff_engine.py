@@ -207,6 +207,220 @@ def detect_phase(df: pd.DataFrame, lookback: int = 120) -> dict:
     return {'phase': 'unknown', 'dir': 'unknown', 'conf': 40}
 
 
+def detect_recent_spring(df: pd.DataFrame, days: int = 5, pierce_pct: float = 0.005) -> bool:
+    """最近N个交易日内是否出现Spring：跌破近期支撑后又收回支撑上方"""
+    cols = detect_columns(df)
+    if not all(k in cols for k in ['close', 'low']):
+        return False
+    if len(df) < days + 5:
+        return False
+
+    col_close = cols['close']
+    col_low = cols['low']
+
+    recent = df.tail(days)
+    prior = df.iloc[:-days]
+    support = prior[col_low].tail(20).min()  # 最近N日之前的20日低点作为支撑
+    spring_low = recent[col_low].min()
+    cur_close = df[col_close].iloc[-1]
+
+    pierced = spring_low < support * (1 - pierce_pct)   # 跌破支撑至少0.5%
+    recovered = cur_close > support                      # 已收回支撑上方
+    return bool(pierced and recovered)
+
+
+def detect_wyckoff_events(df: pd.DataFrame, lookback: int = 250) -> dict | None:
+    """
+    识别威科夫积累结构事件（摆动点法）：
+    PS首次支撑 / SC恐慌抛售 / AR自动反弹 / ST二次测试 / Creek阻力 / Spring洗盘 / LPS最后支撑(缩量) / SOS突破
+    返回: {事件名: {'idx','price',...} | None, 'support': 支撑价, 'creek': 阻力价}
+    """
+    cols = detect_columns(df)
+    if not all(k in cols for k in ['high', 'low', 'close', 'volume']):
+        return None
+
+    d = df.tail(lookback).reset_index(drop=True)
+    high = d[cols['high']].astype(float).values
+    low = d[cols['low']].astype(float).values
+    close = d[cols['close']].astype(float).values
+    vol = d[cols['volume']].astype(float).values
+    n = len(d)
+    if n < 80:
+        return None
+
+    vol_ma = pd.Series(vol).rolling(20).mean().values
+    avg_vol = float(np.nanmean(vol_ma[-20:])) if np.isfinite(vol_ma[-1]) else float(np.nanmean(vol))
+    if avg_vol <= 0:
+        return None
+
+    hi = argrelmax(high, order=3)[0]
+    lo = argrelmin(low, order=3)[0]
+    hi = hi[(hi > 0) & (hi < n - 1)]
+    lo = lo[(lo > 0) & (lo < n - 1)]
+    if len(hi) < 2 or len(lo) < 3:
+        return None
+
+    events = {
+        'PS': None, 'SC': None, 'AR': None, 'ST': None,
+        'Creek': None, 'Spring': None, 'LPS': None, 'SOS': None,
+    }
+    sc_i = ar_i = st_i = spring_i = None
+
+    # --- SC 恐慌抛售：窗口前60%内，放量(>=1.5倍均量)且价格最低的摆动低点 ---
+    for i in lo:
+        if i <= n * 0.6 and vol[i] >= 1.5 * avg_vol:
+            if sc_i is None or low[i] < low[sc_i]:
+                sc_i = i
+    if sc_i is None:
+        return None
+    events['SC'] = {'idx': int(sc_i), 'price': round(float(low[sc_i]), 2),
+                    'vol_ratio': round(float(vol[sc_i]) / avg_vol, 1)}
+
+    # --- PS 首次支撑：SC 之前最近的一个摆动低点 ---
+    ps_cands = [i for i in lo if i < sc_i]
+    if ps_cands:
+        ps_i = max(ps_cands)
+        events['PS'] = {'idx': int(ps_i), 'price': round(float(low[ps_i]), 2)}
+    else:
+        return None
+
+    # --- AR 自动反弹：SC 之后第一个摆动高点 ---
+    ar_cands = [i for i in hi if i > sc_i]
+    if not ar_cands:
+        return None
+    ar_i = int(min(ar_cands))
+    events['AR'] = {'idx': ar_i, 'price': round(float(high[ar_i]), 2)}
+
+    # --- ST 二次测试：AR 之后贴近 SC 低点(±6%)且缩量(<0.8倍均量)的摆动低点 ---
+    for i in lo:
+        if i <= ar_i:
+            continue
+        if abs(low[i] - low[sc_i]) / low[sc_i] <= 0.06 and vol[i] < 0.8 * avg_vol:
+            st_i = int(i)
+            events['ST'] = {'idx': st_i, 'price': round(float(low[i]), 2),
+                            'vol_ratio': round(float(vol[i]) / avg_vol, 1)}
+            break
+    if events['ST'] is None:
+        fallback = [i for i in lo if i > ar_i]
+        if fallback:
+            st_i = int(fallback[0])
+            events['ST'] = {'idx': st_i, 'price': round(float(low[st_i]), 2),
+                            'vol_ratio': round(float(vol[st_i]) / avg_vol, 1)}
+        else:
+            return None
+
+    # --- Creek 阻力区域：AR高点及之后形成的摆动高点密集区上沿 ---
+    creek_cands = [high[i] for i in hi if i >= ar_i and i < n - 15]
+    if not creek_cands:
+        creek_cands = [high[ar_i]]
+    creek = float(max(creek_cands))
+    events['Creek'] = {'price': round(creek, 2)}
+
+    # --- 支撑：SC 与 ST 低点中较低者 ---
+    support = float(min(low[sc_i], low[st_i]))
+
+    # --- Spring 洗盘：ST 之后跌破支撑(>=0.5%)且其后5根内收盘收回支撑上方，取最近一次 ---
+    for i in sorted(lo, reverse=True):
+        if i <= st_i or i >= n - 2:
+            continue
+        if low[i] < support * 0.995:
+            fut = close[i + 1:i + 6]
+            if len(fut) and float(np.max(fut)) > support:
+                spring_i = int(i)
+                events['Spring'] = {
+                    'idx': spring_i,
+                    'price': round(float(low[i]), 2),
+                    'pierce_pct': round((support - low[i]) / support * 100, 2),
+                }
+                break
+
+    # --- LPS 最后支撑：Spring 之后高于 Spring 低点且缩量(<1倍均量)的摆动低点 ---
+    if spring_i is not None:
+        for i in lo:
+            if i > spring_i and low[i] > low[spring_i] * 1.005 and vol[i] < avg_vol:
+                events['LPS'] = {'idx': int(i), 'price': round(float(low[i]), 2),
+                                 'vol_ratio': round(float(vol[i]) / avg_vol, 1)}
+                break
+
+    # --- SOS 突破：最近15根内收盘站上 Creek 且放量(>=1.5倍均量) ---
+    for i in range(max(n - 15, 0), n):
+        if close[i] > creek and vol[i] >= 1.5 * avg_vol:
+            events['SOS'] = {'idx': int(i), 'price': round(float(close[i]), 2),
+                             'vol_ratio': round(float(vol[i]) / avg_vol, 1)}
+            break
+
+    events['support'] = round(support, 2)
+    events['creek'] = round(creek, 2)
+    events['cur'] = round(float(close[-1]), 2)
+    events['n'] = n
+    return events
+
+
+def format_wyckoff_events(events: dict) -> str:
+    """把事件检测结果压缩成一行信号文本"""
+    if not events:
+        return '威科夫结构: 无'
+    found = [k for k in ('PS', 'SC', 'AR', 'ST', 'Creek', 'Spring', 'LPS', 'SOS') if events.get(k)]
+    names = {'PS': '首次支撑', 'SC': '恐慌抛售', 'AR': '自动反弹', 'ST': '二次测试',
+             'Creek': '阻力区', 'Spring': '洗盘', 'LPS': '最后支撑', 'SOS': '强势突破'}
+    detail = ' '.join(f'{k}({names[k]})' for k in found)
+    return f'威科夫结构: {detail} 支撑{events.get("support")}/阻力{events.get("creek")}'
+
+
+def score_wyckoff_structure(events: dict, recent_days: int = 25) -> dict:
+    """
+    威科夫积累结构完整度评分（0~100）
+    基础: PS5 + SC20 + AR10 + ST15；Creek10；Spring25（需近期）；LPS10（需近期）；SOS5（需近期）
+    阈值: >=75 具备完整积累结构
+    """
+    if not events:
+        return {'score': 0, 'rating': 'N', 'pass': False, 'signals': [], 'verdict': '无威科夫结构'}
+
+    n = events.get('n', 0)
+    sc = 0
+    signals = []
+
+    def recent(idx):
+        return idx is not None and n > 0 and (n - idx) <= recent_days
+
+    if events.get('PS'):
+        sc += 5
+        signals.append(f"PS首次支撑@{events['PS']['price']}")
+    if events.get('SC'):
+        sc += 20
+        signals.append(f"SC恐慌抛售@{events['SC']['price']}({events['SC'].get('vol_ratio')}x量)")
+    if events.get('AR'):
+        sc += 10
+        signals.append(f"AR自动反弹@{events['AR']['price']}")
+    if events.get('ST'):
+        sc += 15
+        signals.append(f"ST二次测试@{events['ST']['price']}({events['ST'].get('vol_ratio')}x量)")
+    if events.get('Creek'):
+        sc += 10
+        signals.append(f"Creek阻力区@{events['creek']}")
+    if events.get('Spring') and recent(events['Spring'].get('idx')):
+        sc += 25
+        signals.append(f"Spring洗盘@{events['Spring']['price']}(跌破{events['Spring'].get('pierce_pct')}%)")
+    if events.get('LPS') and recent(events['LPS'].get('idx')):
+        sc += 10
+        signals.append(f"LPS最后支撑@{events['LPS']['price']}(缩量{events['LPS'].get('vol_ratio')}x)")
+    if events.get('SOS') and recent(events['SOS'].get('idx')):
+        sc += 5
+        signals.append(f"SOS强势突破@{events['SOS']['price']}({events['SOS'].get('vol_ratio')}x量)")
+
+    if sc >= 95:
+        rating, verdict = 'S', '结构完整(LPS确认)，即将启动或已启动，重点关注'
+    elif sc >= 85:
+        rating, verdict = 'A', '积累结构完成(Spring洗盘后)，等待LPS/SOS确认'
+    elif sc >= 75:
+        rating, verdict = 'B', '具备积累结构，观察Creek突破'
+    else:
+        rating, verdict = 'C', '结构不完整，暂不关注'
+
+    return {'score': sc, 'rating': rating, 'pass': sc >= 75,
+            'signals': signals, 'verdict': verdict}
+
+
 # ============================================================
 #  右侧评分（趋势确认，跟随买入）
 # ============================================================
