@@ -1,0 +1,7 @@
+{
+  "name": "wyckoff-stock",
+  "version": "1.0.0",
+  "description": "A股诊股工具，基于Wyckoff 2.0方法论",
+  "author": "小皮蛋",
+  "language": "zh"
+}

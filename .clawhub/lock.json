@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "wyckoff-stock": {
+      "version": "1.0.0",
+      "installedAt": 1794216472149,
+      "ownerHandle": "dxarch1980"
+    },
+    "wyckoff-screen": {
+      "version": "1.2.0",
+      "installedAt": 1794217021443,
+      "ownerHandle": "dxarch1980"
+    }
+  }
+}
