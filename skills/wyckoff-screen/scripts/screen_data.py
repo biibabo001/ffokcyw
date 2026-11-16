@@ -32,11 +32,11 @@ def fetch_stock_data(code: str, suppress: bool = True) -> pd.DataFrame | None:
     """
     code = str(code).strip()
 
-    # 主数据源: 腾讯（取最近约600个自然日，覆盖120日回看 + MA60 足够）
+    # 主数据源: 腾讯（取最近约2年；腾讯按2年分块，起始年份对齐当年才有当天实时日线）
     try:
         import akshare as ak
         symbol = _to_tencent_symbol(code)
-        start = (datetime.now() - timedelta(days=600)).strftime("%Y%m%d")
+        start = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
         end = datetime.now().strftime("%Y%m%d")
         if suppress:
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):

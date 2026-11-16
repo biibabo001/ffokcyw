@@ -22,13 +22,26 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # 禁用 akshare 内部 tqdm 进度条（stderr 噪音，会与实时进度显示互相覆盖）
 os.environ.setdefault('TQDM_DISABLE', '1')
 
+# 国内行情源（东财/腾讯）走直连：系统代理(Clash)会把东财流量导向坏节点，导致连接被重置
+_no_proxy = os.environ.get('NO_PROXY', '')
+if 'eastmoney.com' not in _no_proxy:
+    os.environ['NO_PROXY'] = ','.join(filter(None, [_no_proxy, 'eastmoney.com', 'gtimg.cn', 'qq.com']))
+
+# GBK 控制台无法编码 emoji（如 ✅📊），输出时替换为 ? 而非抛 UnicodeEncodeError
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors='replace')
+    except (AttributeError, ValueError):
+        pass
+
 sys.path.insert(0, str(Path(__file__).parent))
 from wyckoff_engine import (detect_recent_spring, detect_wyckoff_events,
                             score_wyckoff_structure)
-from screen_data import fetch_stock_data
+from screen_data import fetch_stock_data, _to_tencent_symbol
 
 import akshare as ak
 import pandas as pd
+import requests
 
 # ========== 配置 ==========
 TOP_N = 20
@@ -41,27 +54,71 @@ STRUCTURE_SCORE_THRESHOLD = 75
 
 # 仅扫描主板：沪市主板(60xxxx) + 深市主板(00xxxx)
 MAIN_BOARD_PREFIXES = ('60', '00')
-# 总市值上限：500亿（元）
-MARKET_CAP_LIMIT = 500 * 10**8
+# 总市值上限：500亿（腾讯行情总市值字段单位为亿元）
+MARKET_CAP_LIMIT_YI = 500
+
+
+def _fetch_market_caps_tx(codes: list) -> dict:
+    """腾讯批量行情获取总市值(亿元)；返回 {code: 总市值}"""
+    caps = {}
+    batch = 80
+    for i in range(0, len(codes), batch):
+        symbols = ','.join(_to_tencent_symbol(c) for c in codes[i:i + batch])
+        for _ in range(2):
+            try:
+                resp = requests.get(f'http://qt.gtimg.cn/q={symbols}', timeout=10)
+                resp.encoding = 'gbk'
+                for line in resp.text.split(';'):
+                    if '="' not in line:
+                        continue
+                    payload = line.split('=', 1)[1].strip().strip('"')
+                    parts = payload.split('~')
+                    if len(parts) > 45:
+                        code = parts[2]
+                        try:
+                            caps[code] = float(parts[45])
+                        except ValueError:
+                            pass
+                break
+            except Exception:
+                continue
+        time.sleep(0.1)
+    return caps
+
+
+def _fetch_code_name_df() -> pd.DataFrame:
+    """交易所官网获取A股代码+名称列表（官网偶发连接中断，带重试）"""
+    for attempt in range(3):
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return ak.stock_info_a_code_name()
+        except Exception:
+            if attempt == 2:
+                raise
+            time.sleep(1)
 
 
 def get_all_codes() -> list:
-    """获取主板、非ST、总市值<500亿的A股代码+名称（code, name）"""
-    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-        df = ak.stock_zh_a_spot_em()
+    """获取主板、非ST、总市值<500亿的A股代码+名称（code, name）
+
+    代码列表来自交易所官网（稳定、不限流），总市值来自腾讯批量行情，避免东财 push2 限流。
+    """
+    df = _fetch_code_name_df()
+    df['code'] = df['code'].astype(str).str.zfill(6)
+    df = df[df['code'].str.startswith(MAIN_BOARD_PREFIXES)]
+    df = df[~df['name'].astype(str).str.contains('ST|退', case=False, regex=True, na=False)]
+
+    caps = _fetch_market_caps_tx(df['code'].tolist())
+
     records = []
     for _, row in df.iterrows():
-        code = str(row['代码']).strip()
-        if not code.startswith(MAIN_BOARD_PREFIXES):
-            continue
-        name = str(row['名称']).strip()
-        if 'ST' in name.upper() or '退' in name:
-            continue
-        cap = row.get('总市值', None)
-        if cap is None or pd.isna(cap) or cap >= MARKET_CAP_LIMIT:
+        code = str(row['code']).strip()
+        name = ''.join(str(row['name']).split())
+        cap = caps.get(code)
+        if cap is None or cap >= MARKET_CAP_LIMIT_YI:
             continue
         records.append((code, name))
-    print(f'  A股总数: {len(df)} -> 纳入扫描: {len(records)}只（主板·非ST·市值<500亿）')
+    print(f'  沪深主板(非ST)共 {len(df)} 只 -> 市值<500亿纳入扫描: {len(records)} 只')
     return records
 
 

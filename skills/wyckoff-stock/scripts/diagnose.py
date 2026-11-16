@@ -6,9 +6,22 @@ A股诊股脚本 - 基于Wyckoff 2.0方法论
 
 import akshare as ak
 import json
+import os
 import sys
 import requests
 from datetime import datetime, timedelta
+
+# 国内行情源（东财/腾讯）走直连：系统代理(Clash)会把东财流量导向坏节点，导致连接被重置
+_no_proxy = os.environ.get('NO_PROXY', '')
+if 'eastmoney.com' not in _no_proxy:
+    os.environ['NO_PROXY'] = ','.join(filter(None, [_no_proxy, 'eastmoney.com', 'gtimg.cn', 'qq.com']))
+
+# GBK 控制台无法编码 emoji（如 ✅📊），输出时替换为 ? 而非抛 UnicodeEncodeError
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors='replace')
+    except (AttributeError, ValueError):
+        pass
 
 def _to_tencent_symbol(stock_code):
     """将6位A股代码转换为腾讯证券代码(sh/sz/bj前缀)"""
@@ -22,9 +35,10 @@ def get_stock_data(stock_code, days=250):
     """获取股票K线数据(腾讯数据源)"""
     try:
         symbol = _to_tencent_symbol(stock_code)
+        start = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
         df = ak.stock_zh_a_hist_tx(
             symbol=symbol,
-            start_date="19000101",
+            start_date=start,
             end_date="20500101",
             adjust="qfq",
         )

@@ -23,6 +23,18 @@ os.environ.setdefault('TQDM_DISABLE', '1')
 # 屏蔽 requests/urllib3 版本告警噪音
 warnings.filterwarnings('ignore', message='urllib3')
 
+# 国内行情源（东财/腾讯）走直连：系统代理(Clash)会把东财流量导向坏节点，导致连接被重置
+_no_proxy = os.environ.get('NO_PROXY', '')
+if 'eastmoney.com' not in _no_proxy:
+    os.environ['NO_PROXY'] = ','.join(filter(None, [_no_proxy, 'eastmoney.com', 'gtimg.cn', 'qq.com']))
+
+# GBK 控制台无法编码 emoji（如 ✅📊），输出时替换为 ? 而非抛 UnicodeEncodeError
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors='replace')
+    except (AttributeError, ValueError):
+        pass
+
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT / 'skills' / 'wyckoff-screen' / 'scripts'))
 sys.path.insert(0, str(ROOT / 'skills' / 'wyckoff-stock' / 'scripts'))
