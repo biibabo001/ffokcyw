@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import requests
+import pandas as pd
 from datetime import datetime, timedelta
 
 # 国内行情源（东财/腾讯）走直连：系统代理(Clash)会把东财流量导向坏节点，导致连接被重置
@@ -31,6 +32,27 @@ def _to_tencent_symbol(stock_code):
         return f"bj{stock_code}"
     return f"sz{stock_code}"
 
+def _fetch_realtime_bar(stock_code):
+    """用腾讯实时行情合成当日 bar（当日日线尚未结算时补今天的数据）"""
+    try:
+        symbol = _to_tencent_symbol(stock_code)
+        resp = requests.get(f"http://qt.gtimg.cn/q={symbol}", timeout=5)
+        resp.encoding = "gbk"
+        parts = resp.text.split("~")
+        if len(parts) <= 34 or not parts[3]:
+            return None
+        return {
+            "日期": datetime.now().date(),
+            "开盘": float(parts[5]),
+            "收盘": float(parts[3]),
+            "最高": float(parts[33]),
+            "最低": float(parts[34]),
+            "成交量": float(parts[6]) * 100,
+        }
+    except Exception:
+        return None
+
+
 def get_stock_data(stock_code, days=250):
     """获取股票K线数据(腾讯数据源)"""
     try:
@@ -51,8 +73,13 @@ def get_stock_data(stock_code, days=250):
             "high": "最高",
             "low": "最低",
             "volume": "成交量",
-        })
-        return df.tail(days).reset_index(drop=True)
+        }).tail(days).reset_index(drop=True)
+        # 当日日线尚未结算时，用实时行情补上今天这根 bar，避免显示昨天收盘价
+        if df["日期"].iloc[-1] < datetime.now().date():
+            bar = _fetch_realtime_bar(stock_code)
+            if bar:
+                df = pd.concat([df, pd.DataFrame([bar])], ignore_index=True)
+        return df
     except Exception as e:
         print(f"Error fetching data: {e}", file=sys.stderr)
         return None
