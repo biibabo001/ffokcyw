@@ -2641,10 +2641,8 @@ def main():
         ).head(
             args.charts
         )
-
-        chart_dir = (
-            ROOT / "charts_4_1"
-        )
+        timestamp = datetime.now().strftime("%Y%m%d%H_%M")
+        chart_dir = ROOT / f"charts_{timestamp}"
 
         count = 0
 
