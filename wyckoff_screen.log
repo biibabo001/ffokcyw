@@ -1,0 +1,240 @@
+2026-11-19 13:34:57,150 ERROR 000008 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:57,186 ERROR 000006 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:57,191 ERROR 000011 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:57,204 ERROR 000009 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:57,207 ERROR 000002 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:58,403 ERROR 000012 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:58,439 ERROR 000026 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:58,453 ERROR 000029 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:58,482 ERROR 000025 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:58,487 ERROR 000028 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:59,425 ERROR 000030 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:59,663 ERROR 000031 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:59,704 ERROR 000035 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:59,735 ERROR 000034 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:34:59,739 ERROR 000032 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:35:00,595 ERROR 000036 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:35:00,706 ERROR 000039 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:35:00,987 ERROR 000042 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:35:00,989 ERROR 000045 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
+2026-11-19 13:35:00,990 ERROR 000048 分析失败：name 'begin' is not defined
+Traceback (most recent call last):
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 2054, in analyze_one
+    x = detect_structure(hist)
+        ^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 1464, in detect_structure
+    phase_a_info = detect_phase_a(
+                   ^^^^^^^^^^^^^^^
+  File "D:\dev\wyckoff\wyckoff_screen.py", line 764, in detect_phase_a
+    for i in range(begin, n):
+                   ^^^^^
+NameError: name 'begin' is not defined
