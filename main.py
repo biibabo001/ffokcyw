@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
-"""Wyckoff 2.0 A股工具统一入口（选股 + 诊股）
+"""Wyckoff A股工具统一入口（选股 + 诊股）
 
 用法:
-  python main.py screen [--threads N] [--limit N] [--top N]
-  python main.py diagnose <股票代码或名称>
+  python main.py screen [参数]          # 全市场威科夫选股（转发到 wyckoff_screen.py）
+  python main.py diagnose <代码或名称>   # 单只股票诊股
 
 示例:
-  python main.py screen --threads 4
+  python main.py screen --threads 5 --charts 10
+  python main.py screen --help          # 查看选股参数
   python main.py diagnose 601985
   python main.py diagnose 中国核电
 """
 
-import argparse
 import os
 import re
 import sys
@@ -23,12 +23,12 @@ os.environ.setdefault('TQDM_DISABLE', '1')
 # 屏蔽 requests/urllib3 版本告警噪音
 warnings.filterwarnings('ignore', message='urllib3')
 
-# 国内行情源（东财/腾讯）走直连：系统代理(Clash)会把东财流量导向坏节点，导致连接被重置
+# 国内行情源（腾讯/交易所）走直连：系统代理(Clash)会把国内行情流量导向坏节点，导致连接被重置
 _no_proxy = os.environ.get('NO_PROXY', '')
 if 'eastmoney.com' not in _no_proxy:
     os.environ['NO_PROXY'] = ','.join(filter(None, [_no_proxy, 'eastmoney.com', 'gtimg.cn', 'qq.com']))
 
-# GBK 控制台无法编码 emoji（如 ✅📊），输出时替换为 ? 而非抛 UnicodeEncodeError
+# GBK 控制台无法编码 emoji，输出时替换为 ? 而非抛 UnicodeEncodeError
 for _stream in (sys.stdout, sys.stderr):
     try:
         _stream.reconfigure(errors='replace')
@@ -36,41 +36,18 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 ROOT = Path(__file__).parent
-sys.path.insert(0, str(ROOT / 'skills' / 'wyckoff-screen' / 'scripts'))
-sys.path.insert(0, str(ROOT / 'skills' / 'wyckoff-stock' / 'scripts'))
+
+USAGE = """用法:
+  python main.py screen [参数]          # 全市场威科夫选股（转发到 wyckoff_screen.py）
+  python main.py diagnose <代码或名称>   # 单只股票诊股
+"""
 
 
-def run_screen(threads: int = 1, limit: int = None, top: int = None):
-    """执行全市场选股（主板·非ST·市值<500亿 + 近一周Spring + 威科夫积累结构）"""
-    import pandas as pd
-    from screen import get_all_codes, screen, format_result, TOP_N
-
-    top_n = top if top else TOP_N
-
-    print('=' * 60)
-    print('  Wyckoff 2.0 选股系统（威科夫积累结构筛选）')
-    info = '  条件: 主板·非ST·市值<500亿 + 近一周Spring + PS/SC/AR/ST结构'
-    if limit:
-        info += f' | 限量: {limit}只'
-    if threads > 1:
-        info += f' | 并发: {threads}线程'
-    print(info)
-    print('=' * 60)
-
-    print('  正在获取股票列表与市值数据（约1分钟）...')
-    codes = get_all_codes()
-
-    result = screen(codes, top_n=top_n, limit=limit, threads=threads)
-
-    print()
-    print(format_result(result))
-
-    today = pd.Timestamp.today().strftime('%Y-%m-%d')
-    out_path = ROOT / 'skills' / 'wyckoff-screen' / 'data' / f'screen_{today}.txt'
-    with open(out_path, 'w', encoding='utf-8') as f:
-        f.write(format_result(result) + '\n')
-    print(f'结果已保存: {out_path}')
-    return result
+def run_screen(argv):
+    """转发到根目录的 wyckoff_screen.py（最新选股逻辑）"""
+    import wyckoff_screen
+    sys.argv = ['wyckoff_screen.py'] + argv
+    wyckoff_screen.main()
 
 
 def resolve_stock(query: str) -> str:
@@ -100,21 +77,21 @@ def resolve_stock(query: str) -> str:
         parts = entry.split('~')
         if len(parts) < 5:
             continue
-        market, code, name_esc, kind = parts[0], parts[1], parts[2], parts[4]
+        code, name_esc, kind = parts[1], parts[2], parts[4]
         if not re.fullmatch(r'\d{6}', code) or kind != 'GP-A':
             continue
         try:
             name = json.loads(f'"{name_esc}"')
         except Exception:
             name = name_esc
-        stocks.append((code, name, market))
+        stocks.append((code, name))
 
     if not stocks:
         raise SystemExit(f'未找到与「{q}」匹配的A股，请改用6位股票代码')
 
-    code, name, market = stocks[0]
+    code, name = stocks[0]
     if len(stocks) > 1:
-        others = '、'.join(f'{n}({c})' for c, n, _ in stocks[1:])
+        others = '、'.join(f'{n}({c})' for c, n in stocks[1:])
         print(f'  多个匹配: {name}({code})、{others}，默认取第一个', file=sys.stderr)
     print(f'  已解析: {name}({code})', file=sys.stderr)
     return code
@@ -131,28 +108,20 @@ def run_diagnose(query: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        prog='main.py',
-        description='Wyckoff 2.0 A股工具统一入口（选股 + 诊股）',
-    )
-    sub = parser.add_subparsers(dest='cmd', required=True)
+    if len(sys.argv) < 2 or sys.argv[1] in ('-h', '--help', 'help'):
+        print(__doc__)
+        return
 
-    p_screen = sub.add_parser(
-        'screen',
-        help='全市场选股（威科夫积累结构：PS/SC/AR/ST/Creek/Spring/LPS/SOS）')
-    p_screen.add_argument('--threads', type=int, default=1,
-                          help='并发取数线程数（默认1，建议3~6）')
-    p_screen.add_argument('--limit', type=int, default=None, help='只扫描前N只（冒烟测试用）')
-    p_screen.add_argument('--top', type=int, default=None, help='输出前N只（默认20）')
+    cmd, rest = sys.argv[1], sys.argv[2:]
 
-    p_diag = sub.add_parser('diagnose', help='单只股票诊股（Wyckoff 2.0）')
-    p_diag.add_argument('query', help='股票代码或名称，如 601985、中国核电')
-
-    args = parser.parse_args()
-    if args.cmd == 'screen':
-        run_screen(threads=args.threads, limit=args.limit, top=args.top)
+    if cmd == 'screen':
+        run_screen(rest)
+    elif cmd == 'diagnose':
+        if not rest:
+            raise SystemExit('用法: python main.py diagnose <股票代码或名称>')
+        run_diagnose(rest[0])
     else:
-        run_diagnose(args.query)
+        raise SystemExit(f'未知命令: {cmd}\n{USAGE}')
 
 
 if __name__ == '__main__':
