@@ -1,9 +1,16 @@
 import unittest
+from contextlib import redirect_stdout
+from datetime import datetime, timedelta
+from io import StringIO
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
 import backtest
+import bottom_base
 from bottom_base import count_round_trips
 import wyckoff_screen as screen
 
@@ -118,3 +125,59 @@ class StructureTests(unittest.TestCase):
         samples = backtest.backtest_stock(history, snapshots=1, horizon=1)
         self.assertEqual(len(samples), 1)
         self.assertAlmostEqual(samples[0][1], 0.05)
+
+
+class BottomBaseDataTests(unittest.TestCase):
+    def test_online_scan_refreshes_even_when_todays_cache_exists(self):
+        today = datetime.now().date()
+        history = history_with_range()
+        history["date"] = pd.date_range(end=today, periods=len(history))
+        revised = history.copy()
+        revised.loc[revised.index[-1], "close"] += 0.1
+        requested_start = (today - timedelta(days=screen.HISTORY_DAYS)).isoformat()
+
+        with TemporaryDirectory(dir=Path.cwd()) as folder:
+            cache_dir = Path(folder)
+            cache_file = cache_dir / "601929.csv"
+            history.assign(history_request_start=requested_start).to_csv(cache_file, index=False)
+            output = StringIO()
+            with (
+                patch.object(screen, "CACHE_DIR", cache_dir),
+                patch.object(screen, "USE_CACHE", True),
+                patch.object(screen.ak, "stock_zh_a_hist_tx", return_value=revised) as fetch,
+                redirect_stdout(output),
+            ):
+                bottom_base.main(["--code", "601929"])
+                bottom_base.main(["--code", "601929", "--cache-only"])
+            fetch.assert_called_once()
+            overlap_start = history["date"].iat[-screen.HISTORY_OVERLAP_BARS].strftime("%Y%m%d")
+            self.assertEqual(fetch.call_args.kwargs["start_date"], overlap_start)
+            self.assertAlmostEqual(pd.read_csv(cache_file)["close"].iat[-1], revised["close"].iat[-1])
+            self.assertEqual(output.getvalue().count(f"本次最新日线 {today}"), 2)
+
+    def test_cached_history_appends_today_and_refetches_if_adjusted_prices_change(self):
+        today = datetime.now().date()
+        start = today - timedelta(days=screen.HISTORY_DAYS)
+        cached = history_with_range()
+        cached["date"] = pd.date_range(end=today - timedelta(days=1), periods=len(cached))
+        updated = append_bars(cached, [(103.0, 104.0, 105.0, 102.0, 100.0)])
+        adjusted = updated.copy()
+        adjusted.loc[adjusted.index[:-1], ["open", "high", "low", "close"]] *= 0.9
+        prices = ["open", "high", "low", "close"]
+
+        for provider_history, needs_full in [(updated, False), (adjusted, True)]:
+            with self.subTest(needs_full=needs_full), TemporaryDirectory(dir=Path.cwd()) as folder:
+                path = Path(folder) / "601929.csv"
+                cached.assign(history_request_start=start.isoformat()).to_csv(path, index=False)
+                with (
+                    patch.object(screen, "CACHE_DIR", path.parent),
+                    patch.object(screen, "USE_CACHE", True),
+                    patch.object(screen.ak, "stock_zh_a_hist_tx", return_value=provider_history) as fetch,
+                ):
+                    result = screen.fetch_history("601929", refresh=True)
+                self.assertEqual(fetch.call_count, 2 if needs_full else 1)
+                if needs_full:
+                    self.assertEqual(fetch.call_args.kwargs["start_date"], start.strftime("%Y%m%d"))
+                self.assertEqual(len(result), len(updated))
+                self.assertEqual(result["date"].iat[-1].date(), today)
+                np.testing.assert_allclose(pd.read_csv(path)[prices], provider_history[prices])

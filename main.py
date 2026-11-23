@@ -2,8 +2,8 @@
 """Wyckoff A股工具统一入口（选股 + 诊股）
 
 用法:
-  python main.py screen [参数]          # 全市场威科夫选股（转发到 wyckoff_screen.py）
-  python main.py base [参数]            # 大涨、深跌后横盘的股票
+  python main.py screen [参数]          # 一次扫描深跌后横盘及三个威科夫事件名单
+  python main.py base [参数]            # 只查深跌后横盘，支持离线和单股复查
   python main.py diagnose <代码或名称>   # 单只股票诊股
 
 示例:
@@ -17,7 +17,6 @@ import os
 import re
 import sys
 import warnings
-from pathlib import Path
 
 # 禁用 akshare 内部 tqdm 进度条（stderr 噪音，会干扰实时进度显示）
 os.environ.setdefault('TQDM_DISABLE', '1')
@@ -36,11 +35,9 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-ROOT = Path(__file__).parent
-
 USAGE = """用法:
-  python main.py screen [参数]          # 全市场威科夫选股（转发到 wyckoff_screen.py）
-  python main.py base [参数]            # 大涨、深跌后横盘的股票
+  python main.py screen [参数]          # 一次扫描深跌后横盘及三个威科夫事件名单
+  python main.py base [参数]            # 只查深跌后横盘，支持离线和单股复查
   python main.py diagnose <代码或名称>   # 单只股票诊股
 """
 

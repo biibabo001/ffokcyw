@@ -1,14 +1,12 @@
 """寻找大涨、深跌后进入稳定横盘的主板股票。"""
 
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-
-import wyckoff_screen as screen
-
 
 @dataclass(frozen=True)
 class BaseMatch:
@@ -101,6 +99,8 @@ def detect_base(history):
 
 
 def main(argv=None):
+    import wyckoff_screen as screen
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--code", help="只检查一只股票，例如 601929")
     parser.add_argument("--cache-only", action="store_true", help="只使用本地日线缓存")
@@ -126,7 +126,7 @@ def main(argv=None):
             if args.cache_only:
                 data = screen.normalize_history(pd.read_csv(screen.CACHE_DIR / f"{code}.csv"))
             else:
-                data = screen.fetch_history(code)
+                data = screen.fetch_history(code, refresh=True)
             if data is not None:
                 return code, name, data["date"].iloc[-1].date(), detect_base(data)
         except Exception:
@@ -149,6 +149,11 @@ def main(argv=None):
     )
     unavailable = sum(row[2] is None for row in results)
     print(f"{mode}扫描 {len(results)} 只，符合 {len(matches)} 只，数据不可用 {unavailable} 只。")
+    date_counts = Counter(row[2] for row in results if row[2] is not None)
+    if date_counts:
+        latest = max(date_counts)
+        older = sum(date_counts.values()) - date_counts[latest]
+        print(f"本次最新日线 {latest}（{date_counts[latest]} 只），另有 {older} 只日线早于该日期。")
     for code, name, as_of, match in matches:
         print(
             f"{code} {name} | 高点 {match.peak_date} {match.peak:.2f}，"

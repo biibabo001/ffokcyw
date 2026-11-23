@@ -8,7 +8,7 @@ A股 Wyckoff 早期吸筹机会筛选器 4.1
 1. 获取沪深主板股票日线数据
 2. 可选流通市值过滤
 3. 识别交易区间、Spring、Test、SOS、LPS
-4. 输出 Spring+Test、Spring早期、LPS 三个独立名单
+4. 输出深跌后横盘、Spring+Test、Spring早期、LPS 四个名单
 5. 输出排除名单和全量扫描结果
 6. 导出 Excel
 7. 生成候选股票 K 线图
@@ -26,6 +26,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import NamedTuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -41,6 +42,8 @@ import numpy as np
 import pandas as pd
 import requests
 import akshare as ak
+
+from bottom_base import detect_base
 
 
 # ============================================================
@@ -60,6 +63,7 @@ MAIN_PREFIXES = (
 # 行情还要覆盖交易区间及其后的事件，为前期高点留足两年回看。
 HISTORY_DAYS = 4 * 366
 MIN_BARS = 250
+HISTORY_OVERLAP_BARS = 5
 
 CAP_MIN = 30.0
 CAP_MAX = 300.0
@@ -404,60 +408,112 @@ def normalize_history(df, *, min_bars=MIN_BARS):
     return d.reset_index(drop=True)
 
 
-def fetch_history(code):
-    """
-    获取前复权日线数据（带本地缓存：当日已取过则直接读缓存）。
-    """
+def _request_history(code, start_day, end_day, *, min_bars=MIN_BARS):
+    raw = ak.stock_zh_a_hist_tx(
+        symbol=tencent_symbol(code),
+        start_date=start_day.strftime("%Y%m%d"),
+        end_date=end_day.strftime("%Y%m%d"),
+        adjust="qfq",
+    )
+    history = normalize_history(raw, min_bars=min_bars)
+    if history is None or "date" not in history:
+        return None
+    history = history.loc[history["date"].between(pd.Timestamp(start_day), pd.Timestamp(end_day))]
+    return history.reset_index(drop=True) if len(history) >= min_bars else None
 
+
+def _merge_recent_history(cached, recent, today):
+    if recent is None:
+        return None
+    overlap = cached.tail(HISTORY_OVERLAP_BARS).set_index("date")
+    incoming = recent.set_index("date")
+    # 当天的日线可能从盘中状态更新到收盘，之前的数据才用来判断复权口径。
+    confirmed = overlap.loc[overlap.index < pd.Timestamp(today)]
+    prices = ["open", "high", "low", "close"]
+    if not overlap.index.isin(incoming.index).all() or not np.allclose(
+        confirmed[prices], incoming.loc[confirmed.index, prices], atol=1e-6, rtol=0,
+    ):
+        return None
+    return pd.concat([cached.iloc[:-len(overlap)], recent], ignore_index=True)
+
+
+def _save_history_cache(cache_path, history, start_day):
+    temp_path = None
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(
+            mode="w", dir=cache_path.parent, suffix=".tmp",
+            encoding="utf-8", newline="", delete=False,
+        ) as target:
+            temp_path = Path(target.name)
+            history.assign(history_request_start=start_day.isoformat()).to_csv(target, index=False)
+        temp_path.replace(cache_path)
+    except OSError as exc:
+        LOG.warning("%s 缓存写入失败：%s", cache_path.name, exc)
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def fetch_history(code, *, refresh=False):
+    """复用历史缓存并补齐最近前复权日线。refresh=True 总会查询行情源。"""
     cache_path = CACHE_DIR / f"{code}.csv"
-    today = datetime.now().date()
+    now = datetime.now()
+    today = now.date()
+    market_close = now.replace(hour=15, minute=0, second=0, microsecond=0)
+    after_close = today.weekday() < 5 and now >= market_close
     start_day = today - timedelta(days=HISTORY_DAYS)
 
+    cached = None
     if USE_CACHE and cache_path.exists():
         try:
-            mtime = datetime.fromtimestamp(cache_path.stat().st_mtime).date()
-            if mtime == today:
-                cached = pd.read_csv(cache_path)
-                if (
-                    not cached.empty
-                    and "history_request_start" in cached.columns
-                    and cached["history_request_start"].iat[0] == start_day.isoformat()
-                ):
-                    cached = normalize_history(cached)
-                    if cached is not None:
-                        return cached
-        except Exception:
+            saved_at = datetime.fromtimestamp(cache_path.stat().st_mtime)
+            raw_cache = pd.read_csv(cache_path)
+            if (
+                not raw_cache.empty
+                and "history_request_start" in raw_cache
+                and pd.Timestamp(raw_cache["history_request_start"].iat[0]) <= pd.Timestamp(start_day)
+            ):
+                history = normalize_history(raw_cache.drop(columns="history_request_start"))
+                if history is not None and "date" in history:
+                    history = history.loc[
+                        history["date"].between(pd.Timestamp(start_day), pd.Timestamp(today))
+                    ].reset_index(drop=True)
+                    if len(history) >= MIN_BARS:
+                        cached = history
+        except (OSError, ValueError, TypeError):
             pass
 
-    try:
-        raw = ak.stock_zh_a_hist_tx(
-            symbol=tencent_symbol(code),
-            start_date=start_day.strftime("%Y%m%d"),
-            end_date=today.strftime("%Y%m%d"),
-            adjust="qfq",
+    if cached is not None and not refresh and saved_at.date() == today and (
+        not after_close or saved_at >= market_close and (
+            cached["date"].iat[-1].date() == today
+            or now - saved_at < timedelta(minutes=10)
         )
+    ):
+        return cached
 
-        hist = normalize_history(raw)
-
-    except Exception as exc:
-        LOG.warning(
-            "%s 行情获取失败：%s",
-            code,
-            exc,
-        )
-
-        return None
-
-    if hist is not None and USE_CACHE:
+    history = None
+    if cached is not None:
+        recent_start = cached["date"].iat[-HISTORY_OVERLAP_BARS].date()
         try:
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            hist.assign(history_request_start=start_day.isoformat()).to_csv(
-                cache_path, index=False, encoding="utf-8",
-            )
-        except Exception:
-            pass
+            recent = _request_history(code, recent_start, today, min_bars=1)
+            history = _merge_recent_history(cached, recent, today)
+        except Exception as exc:
+            LOG.info("%s 增量日线获取失败，尝试重新拉取历史：%s", code, exc)
 
-    return hist
+    if history is None:
+        try:
+            history = _request_history(code, start_day, today)
+        except Exception as exc:
+            LOG.warning("%s 行情获取失败：%s", code, exc)
+            return None
+
+    if history is not None and USE_CACHE:
+        _save_history_cache(cache_path, history, start_day)
+    return history
 
 
 # ============================================================
@@ -1902,100 +1958,124 @@ def classify_passes(x, spring_score, early_score, lps_score):
     }
 
 
-def analyze_one(code, name):
+CANDIDATE_LISTS = (
+    ("深跌后横盘", "_base_pass", "base_days"),
+    ("Spring_Test主名单", "_main_pass", "Spring_Test_score"),
+    ("Spring早期观察", "_early_pass", "Spring_early_score"),
+    ("LPS备选", "_lps_pass", "LPS_score"),
+)
 
-    hist = fetch_history(code)
+BASE_COLUMNS = {
+    "base_peak_date": "横盘前高点日期",
+    "base_peak": "横盘前高点",
+    "base_rally_pct": "高点前涨幅%",
+    "base_drawdown_pct": "高点后跌幅%",
+    "base_start_date": "横盘起点",
+    "base_days": "横盘交易日数",
+    "base_lower": "主要收盘区间下沿",
+    "base_upper": "主要收盘区间上沿",
+    "base_round_trips": "区间往返次数",
+}
 
+
+def event_result(hist):
+    x = detect_structure(hist)
+
+    (
+        spring_score,
+        early_score,
+        lps_score,
+    ) = score_lists(x)
+
+    return {
+
+        "Spring_Test_score": spring_score,
+        "Spring_early_score": early_score,
+        "LPS_score": lps_score,
+
+        "range_quality": x["range_quality"],
+        "range_days": x["range_days"],
+        "range_low": x["range_low"],
+        "range_high": x["range_high"],
+        "range_height_pct": x["range_height_pct"],
+        "drawdown_pct": x["drawdown_pct"],
+
+        "support": x["support"],
+        "resistance": x["resistance"],
+        "support_touches": x["support_touches"],
+        "resistance_touches": x["resistance_touches"],
+
+        "volume_contraction": x["volume_contraction"],
+
+        "Spring": x["spring"],
+        "Spring_date": x["spring_date"],
+        "Spring_low": x["spring_low"],
+        "Spring_distance_pct": x["spring_distance_pct"],
+        "days_since_spring": x["days_since_spring"],
+        "Spring_rebound_pct": x["rebound_pct"],
+        "Spring_invalid": x["spring_invalid"],
+
+        "Spring_Test": x["spring_test"],
+        "Test_date": x["test_date"],
+        "Test_volume_ratio": x["test_volume_ratio"],
+
+        "distance_to_support_pct": x["distance_to_support_pct"],
+
+        "SOS": x["sos"],
+        "SOS_date": x["sos_date"],
+        "SOS_volume_ratio": x["sos_volume_ratio"],
+
+        "LPS": x["lps"],
+        "LPS_status": x["lps_status"],
+        "SOS_resistance": x["sos_resistance"],
+        "LPS_date": x["lps_date"],
+        "LPS_volume_ratio": x["lps_volume_ratio"],
+        "LPS_distance_pct": x["lps_distance_pct"],
+
+        "MACD_divergence": x["macd_divergence"],
+        "volume_divergence": x["volume_divergence"],
+        "higher_low": x["higher_low"],
+        "MACD_turn_up": x["macd_turn_up"],
+
+        "MA20_slope_pct": x["ma20_slope_pct"],
+        "MA60_slope_pct": x["ma60_slope_pct"],
+
+        "ma20": x["ma20"],
+        "ma60": x["ma60"],
+
+        "exclude_reasons": x["exclude_reasons"],
+
+        **{
+            f"_{name}_pass": passed
+            for name, passed in classify_passes(x, spring_score, early_score, lps_score).items()
+        },
+    }
+
+
+def analyze_one(code, name, *, event_eligible=True, keep_chart_data=False):
+    hist = fetch_history(code, refresh=True)
     if hist is None:
         return None
 
     try:
-
-        x = detect_structure(hist)
-
-        (
-            spring_score,
-            early_score,
-            lps_score,
-        ) = score_lists(x)
-
+        base = detect_base(hist)
         row = {
             "code": code,
             "name": name,
-
-            "Spring_Test_score": spring_score,
-            "Spring_early_score": early_score,
-            "LPS_score": lps_score,
-
-            "range_quality": x["range_quality"],
-            "range_days": x["range_days"],
-            "range_low": x["range_low"],
-            "range_high": x["range_high"],
-            "range_height_pct": x["range_height_pct"],
-            "drawdown_pct": x["drawdown_pct"],
-
-            "support": x["support"],
-            "resistance": x["resistance"],
-            "support_touches": x["support_touches"],
-            "resistance_touches": x["resistance_touches"],
-
-            "volume_contraction": x["volume_contraction"],
-
-            "Spring": x["spring"],
-            "Spring_date": x["spring_date"],
-            "Spring_low": x["spring_low"],
-            "Spring_distance_pct": x["spring_distance_pct"],
-            "days_since_spring": x["days_since_spring"],
-            "Spring_rebound_pct": x["rebound_pct"],
-            "Spring_invalid": x["spring_invalid"],
-
-            "Spring_Test": x["spring_test"],
-            "Test_date": x["test_date"],
-            "Test_volume_ratio": x["test_volume_ratio"],
-
-            "distance_to_support_pct": x["distance_to_support_pct"],
-
-            "SOS": x["sos"],
-            "SOS_date": x["sos_date"],
-            "SOS_volume_ratio": x["sos_volume_ratio"],
-
-            "LPS": x["lps"],
-            "LPS_status": x["lps_status"],
-            "SOS_resistance": x["sos_resistance"],
-            "LPS_date": x["lps_date"],
-            "LPS_volume_ratio": x["lps_volume_ratio"],
-            "LPS_distance_pct": x["lps_distance_pct"],
-
-            "MACD_divergence": x["macd_divergence"],
-            "volume_divergence": x["volume_divergence"],
-            "higher_low": x["higher_low"],
-            "MACD_turn_up": x["macd_turn_up"],
-
-            "MA20_slope_pct": x["ma20_slope_pct"],
-            "MA60_slope_pct": x["ma60_slope_pct"],
-
-            "close": x["close"],
-            "ma20": x["ma20"],
-            "ma60": x["ma60"],
-
-            "exclude_reasons": x["exclude_reasons"],
-
-            **{
-                f"_{name}_pass": passed
-                for name, passed in classify_passes(x, spring_score, early_score, lps_score).items()
-            },
+            "as_of": hist["date"].iat[-1].date().isoformat(),
+            "close": float(hist["close"].iat[-1]),
+            "event_eligible": event_eligible,
+            **{column: getattr(base, column.removeprefix("base_"), None) for column in BASE_COLUMNS},
+            **{flag: False for _, flag, _ in CANDIDATE_LISTS},
+            "_base_pass": base is not None,
         }
-
+        if event_eligible:
+            row.update(event_result(hist))
+        if keep_chart_data and any(row[flag] for _, flag, _ in CANDIDATE_LISTS):
+            row["_chart_data"] = hist, base
         return row
-
     except Exception as exc:
-
-        LOG.exception(
-            "%s 分析失败：%s",
-            code,
-            exc,
-        )
-
+        LOG.exception("%s 分析失败：%s", code, exc)
         return None
 
 
@@ -2003,7 +2083,7 @@ def analyze_one(code, name):
 # 八、K线图
 # ============================================================
 
-def draw_chart(code, name, out_dir):
+def draw_chart(code, name, out_dir, *, hist=None, base=None, show_events=True):
 
     try:
 
@@ -2021,14 +2101,14 @@ def draw_chart(code, name, out_dir):
 
         return False
 
-    hist = fetch_history(code)
+    if hist is None:
+        hist = fetch_history(code)
 
     if hist is None:
         return False
 
     try:
 
-        x = detect_structure(hist)
 
         d = hist.tail(180).reset_index(
             drop=True
@@ -2109,58 +2189,68 @@ def draw_chart(code, name, out_dir):
             linewidth=1,
         )
 
-        # 支撑和阻力
-        ax.axhline(
-            x["support"],
-            linestyle="--",
-            linewidth=0.9,
-            label="Support",
-        )
+        if base is not None:
+            base_start = max(0, len(d) - base.days)
+            ax.fill_between(
+                xx[base_start:], base.lower, base.upper,
+                color="tab:blue", alpha=0.16,
+                label=f"Bottom base from {base.start_date}",
+            )
 
-        ax.axhline(
-            x["resistance"],
-            linestyle="--",
-            linewidth=0.9,
-            label="Resistance",
-        )
+        if show_events:
+            x = detect_structure(hist)
+            # 支撑和阻力
+            ax.axhline(
+                x["support"],
+                linestyle="--",
+                linewidth=0.9,
+                label="Support",
+            )
 
-        if x["sos"] and not np.isclose(x["sos_resistance"], x["resistance"]):
-            ax.axhline(x["sos_resistance"], linestyle=":", linewidth=0.9, label="SOS level")
+            ax.axhline(
+                x["resistance"],
+                linestyle="--",
+                linewidth=0.9,
+                label="Resistance",
+            )
 
-        # 事件标注
-        lps_label = {"已确认": "LPS confirmed", "观察中": "LPS watching", "失效": "LPS failed"}
-        events = [
-            ("Spring", x["spring_idx"]),
-            ("Test", x["test_idx"]),
-            ("SOS", x["sos_idx"]),
-            (lps_label.get(x["lps_status"], "LPS"), x["lps_idx"]),
-        ]
+            if x["sos"] and not np.isclose(x["sos_resistance"], x["resistance"]):
+                ax.axhline(x["sos_resistance"], linestyle=":", linewidth=0.9, label="SOS level")
 
-        for label, idx in events:
+            # 事件标注
+            lps_label = {"已确认": "LPS confirmed", "观察中": "LPS watching", "失效": "LPS failed"}
+            events = [
+                ("Spring", x["spring_idx"]),
+                ("Test", x["test_idx"]),
+                ("SOS", x["sos_idx"]),
+                (lps_label.get(x["lps_status"], "LPS"), x["lps_idx"]),
+            ]
 
-            if (
-                idx is not None
-                and offset <= idx < len(hist)
-            ):
+            for label, idx in events:
 
-                xi = idx - offset
+                if (
+                    idx is not None
+                    and offset <= idx < len(hist)
+                ):
 
-                event_price = float(
-                    hist.iloc[idx]["low"]
-                )
+                    xi = idx - offset
 
-                ax.annotate(
-                    label,
-                    (xi, event_price),
-                    xytext=(0, -16),
-                    textcoords="offset points",
-                    ha="center",
-                    fontsize=8,
-                    arrowprops={
-                        "arrowstyle": "->",
-                        "lw": 0.6,
-                    },
-                )
+                    event_price = float(
+                        hist.iloc[idx]["low"]
+                    )
+
+                    ax.annotate(
+                        label,
+                        (xi, event_price),
+                        xytext=(0, -16),
+                        textcoords="offset points",
+                        ha="center",
+                        fontsize=8,
+                        arrowprops={
+                            "arrowstyle": "->",
+                            "lw": 0.6,
+                        },
+                    )
 
         ax.set_title(
             f"{name} ({code}) - Wyckoff {VERSION}"
@@ -2220,6 +2310,15 @@ def draw_chart(code, name, out_dir):
 # 九、Excel导出
 # ============================================================
 
+def candidate_frames(result_df):
+    for title, flag, order_by in CANDIDATE_LISTS:
+        frame = result_df.loc[result_df[flag]]
+        if not frame.empty:
+            order = ["as_of", order_by] if flag == "_base_pass" else [order_by]
+            frame = frame.sort_values([*order, "code"], ascending=[False] * len(order) + [True])
+        yield title, frame
+
+
 def export_excel(
     result_df,
     output,
@@ -2229,6 +2328,9 @@ def export_excel(
     rename = {
         "code": "代码",
         "name": "名称",
+        "as_of": "行情日期",
+        "event_eligible": "纳入事件筛选",
+        **BASE_COLUMNS,
 
         "Spring_Test_score": "Spring_Test质量分",
         "Spring_early_score": "Spring早期质量分",
@@ -2293,74 +2395,19 @@ def export_excel(
         engine="openpyxl",
     ) as writer:
 
+        flags = [flag for _, flag, _ in CANDIDATE_LISTS]
+        included = result_df[flags].any(axis=1)
         sheets = [
-            (
-                "Spring_Test主名单",
-                result_df[
-                    result_df["_main_pass"]
-                ].sort_values(
-                    "Spring_Test_score",
-                    ascending=False,
-                ),
-            ),
-
-            (
-                "Spring早期观察",
-                result_df[
-                    result_df["_early_pass"]
-                ].sort_values(
-                    "Spring_early_score",
-                    ascending=False,
-                ),
-            ),
-
-            (
-                "LPS备选",
-                result_df[
-                    result_df["_lps_pass"]
-                ].sort_values(
-                    "LPS_score",
-                    ascending=False,
-                ),
-            ),
-
-            (
-                "排除名单",
-                result_df[
-                    ~(
-                        result_df["_main_pass"]
-                        | result_df["_early_pass"]
-                        | result_df["_lps_pass"]
-                    )
-                ],
-            ),
-
-            (
-                "全量扫描数据",
-                result_df.sort_values(
-                    [
-                        "_main_pass",
-                        "_early_pass",
-                        "_lps_pass",
-                    ],
-                    ascending=False,
-                ),
-            ),
+            *candidate_frames(result_df),
+            ("排除名单", result_df.loc[~included]),
+            ("全量扫描数据", result_df.sort_values(flags, ascending=False)),
         ]
-
         for sheet_name, frame in sheets:
-
-            export_df = (
-                frame.drop(
-                    columns=[
-                        "_main_pass",
-                        "_early_pass",
-                        "_lps_pass",
-                    ],
-                    errors="ignore",
-                )
-                .rename(columns=rename)
-            )
+            if sheet_name == "深跌后横盘":
+                columns = ["code", "name", "as_of", "close", *BASE_COLUMNS]
+            else:
+                columns = list(rename)
+            export_df = frame.reindex(columns=columns).rename(columns=rename)
 
             export_df.to_excel(
                 writer,
@@ -2388,6 +2435,10 @@ def export_excel(
                     "失败数量",
                     stats["failed"],
                 ],
+                ["最新日线", result_df["as_of"].max()],
+                ["早于最新日线的股票数", int(result_df["as_of"].lt(result_df["as_of"].max()).sum())],
+                ["纳入事件筛选的股票数", stats["event_eligible"]],
+                ["深跌后横盘名单数", stats["base"]],
                 [
                     "Spring+Test名单数",
                     stats["main"],
@@ -2402,7 +2453,7 @@ def export_excel(
                 ],
                 [
                     "策略说明",
-                    "先硬过滤、后独立评分；名单不凑数；所有事件均为规则候选，需人工看图复核。",
+                    "深跌后横盘独立筛选，不限流通市值。三个事件名单先检查结构，再按各自门槛评分。",
                 ],
                 [
                     "参数说明",
@@ -2523,13 +2574,13 @@ def main():
         "--score-threshold",
         type=int,
         default=P["score_threshold"],
-        help="名单最低评分",
+        help="三个事件名单的最低评分",
     )
 
     parser.add_argument(
         "--no-cache",
         action="store_true",
-        help="忽略本地缓存，强制重新取数",
+        help="完整下载历史日线，不读取或写入缓存",
     )
 
     args = parser.parse_args()
@@ -2552,7 +2603,7 @@ def main():
     )
 
     print(
-        "三个独立名单：Spring+Test / Spring早期 / LPS"
+        "四个名单：深跌后横盘 / Spring+Test / Spring早期 / LPS"
     )
 
     print(
@@ -2574,61 +2625,20 @@ def main():
     )
 
     stocks = get_stock_universe()
-
-    print(
-        f"主板非ST：{len(stocks)} 只"
-    )
-
-    # --------------------------------------------------------
-    # 2. 市值过滤
-    # --------------------------------------------------------
+    universe = stocks[:args.limit] if args.limit > 0 else stocks
+    print(f"主板非ST：{len(stocks)} 只，本次扫描 {len(universe)} 只")
+    print("深跌后横盘名单不限制流通市值。")
 
     if args.no_cap_filter:
-
-        universe = stocks
-
-        print(
-            "已跳过流通市值过滤"
-        )
-
+        event_codes = {code for code, _ in universe}
+        print("[2/4] 事件名单跳过流通市值过滤")
     else:
-
-        print(
-            "[2/4] 获取腾讯行情流通市值..."
-        )
-
-        caps = fetch_float_caps(
-            [
-                code
-                for code, _ in stocks
-            ]
-        )
-
-        universe = [
-            (code, name)
-            for code, name in stocks
-            if (
-                code in caps
-                and args.min_cap
-                <= caps[code]
-                <= args.max_cap
-            )
-        ]
-
-        print(
-            f"市值过滤后：{len(universe)} 只"
-        )
-
-        if not universe:
-
-            print(
-                "没有通过市值过滤的股票，可使用 --no-cap-filter 验证。"
-            )
-
-            return
-
-    if args.limit > 0:
-        universe = universe[:args.limit]
+        print("[2/4] 获取事件名单所需的流通市值...")
+        caps = fetch_float_caps([code for code, _ in universe])
+        event_codes = {
+            code for code, cap in caps.items() if args.min_cap <= cap <= args.max_cap
+        }
+        print(f"纳入事件筛选：{len(event_codes)} 只")
 
     # --------------------------------------------------------
     # 3. 扫描
@@ -2639,6 +2649,7 @@ def main():
     )
 
     results = []
+    chart_data = {}
     failed = 0
 
     with ThreadPoolExecutor(
@@ -2650,6 +2661,8 @@ def main():
                 analyze_one,
                 code,
                 name,
+                event_eligible=code in event_codes,
+                keep_chart_data=args.charts > 0,
             ): (code, name)
             for code, name in universe
         }
@@ -2666,6 +2679,9 @@ def main():
                 if result is None:
                     failed += 1
                 else:
+                    chart = result.pop("_chart_data", None)
+                    if chart is not None:
+                        chart_data[result["code"]] = chart
                     results.append(result)
 
             except Exception as exc:
@@ -2700,6 +2716,8 @@ def main():
     df = pd.DataFrame(
         results
     )
+    for column in ("base_days", "base_round_trips"):
+        df[column] = df[column].astype("Int64")
 
     # --------------------------------------------------------
     # 4. 统计
@@ -2709,6 +2727,8 @@ def main():
         "universe": len(universe),
         "success": len(df),
         "failed": failed,
+        "base": int(df["_base_pass"].sum()),
+        "event_eligible": int(df["event_eligible"].sum()),
 
         "main": int(
             df["_main_pass"].sum()
@@ -2746,124 +2766,61 @@ def main():
         f"成功分析 {len(df)} 只，失败 {failed} 只"
     )
 
+    latest = df["as_of"].max()
+    older = int(df["as_of"].lt(latest).sum())
+    print(f"本次最新日线 {latest}，另有 {older} 只日线早于该日期。")
     print(
-        f"Spring+Test：{stats['main']} 只 "
-        f"| Spring早期：{stats['early']} 只 "
-        f"| LPS备选：{stats['lps']} 只"
+        f"深跌后横盘：{stats['base']} 只 | Spring+Test：{stats['main']} 只 "
+        f"| Spring早期：{stats['early']} 只 | LPS备选：{stats['lps']} 只"
     )
 
-    # --------------------------------------------------------
-    # 5. 打印名单
-    # --------------------------------------------------------
-
-    lists = [
-        (
-            "Spring+Test主名单",
-            "_main_pass",
-            "Spring_Test_score",
-        ),
-        (
-            "Spring早期观察",
-            "_early_pass",
-            "Spring_early_score",
-        ),
-        (
-            "LPS备选",
-            "_lps_pass",
-            "LPS_score",
-        ),
-    ]
-
-    for title, flag, score_col in lists:
-
-        part = (
-            df[df[flag]]
-            .sort_values(
-                score_col,
-                ascending=False,
-            )
-            .head(args.top)
-        )
-
-        print(
-            f"\n--- {title} ---"
-        )
-
-        if part.empty:
-
-            print(
-                "本次没有符合硬性条件的股票。"
-            )
-
-        else:
-
+    frames = list(candidate_frames(df))
+    for (title, flag, score_col), (_, frame) in zip(CANDIDATE_LISTS, frames):
+        print(f"\n--- {title} ---")
+        if frame.empty:
+            print("本次没有符合硬性条件的股票。")
+            continue
+        if flag == "_base_pass":
             columns = [
-                "code",
-                "name",
-                score_col,
-                "Spring_date",
-                "Test_date",
-                "SOS_date",
-                "LPS_date",
+                "code", "name", "as_of", "base_start_date", "base_days",
+                "base_lower", "base_upper", "base_round_trips",
             ]
-
-            print(
-                part[columns].to_string(
-                    index=False
-                )
-            )
-
-    # --------------------------------------------------------
-    # 6. 生成K线图
-    # --------------------------------------------------------
+            display = frame[columns].rename(columns={
+                "code": "代码", "name": "名称", "as_of": "行情日期", **BASE_COLUMNS,
+            })
+        else:
+            columns = [
+                "code", "name", "as_of", score_col, "Spring_date",
+                "Test_date", "SOS_date", "LPS_date",
+            ]
+            display = frame[columns]
+        print(display.head(args.top).to_string(index=False))
 
     if args.charts > 0:
-
-        chart_candidates = pd.concat(
-            [
-                df[
-                    df["_main_pass"]
-                ].sort_values(
-                    "Spring_Test_score",
-                    ascending=False,
-                ).head(args.charts),
-
-                df[
-                    df["_early_pass"]
-                ].sort_values(
-                    "Spring_early_score",
-                    ascending=False,
-                ).head(args.charts),
-
-                df[
-                    df["_lps_pass"]
-                ].sort_values(
-                    "LPS_score",
-                    ascending=False,
-                ).head(args.charts),
-            ]
-        ).drop_duplicates(
-            "code"
-        ).head(
-            args.charts
+        # 从各名单轮流选图，同一只股票只画一次。
+        chart_candidates = (
+            pd.concat([
+                frame.head(args.charts).assign(chart_rank=np.arange(min(len(frame), args.charts)))
+                for _, frame in frames if not frame.empty
+            ]).sort_values("chart_rank", kind="stable").drop_duplicates("code").head(args.charts)
+            if chart_data else df.iloc[:0]
         )
         timestamp = datetime.now().strftime("%Y%m%d%H_%M")
         chart_dir = ROOT / f"charts_{timestamp}"
-
         count = 0
 
         for _, row in chart_candidates.iterrows():
-
+            hist, base = chart_data[row["code"]]
             if draw_chart(
-                row["code"],
-                row["name"],
-                chart_dir,
+                row["code"], row["name"], chart_dir, hist=hist, base=base,
+                show_events=any(row[flag] for _, flag, _ in CANDIDATE_LISTS[1:]),
             ):
                 count += 1
 
-        print(
-            f"K线图生成：{count} 张，目录：{chart_dir}"
-        )
+        if count:
+            print(f"K线图生成：{count} 张，目录：{chart_dir}")
+        else:
+            print("没有生成候选 K 线图。")
 
 
 if __name__ == "__main__":

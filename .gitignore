@@ -1,5 +1,5 @@
 # 本地缓存（历史行情，可重新生成）
-cache/
+
 
 # Python 字节码
 __pycache__/
@@ -7,8 +7,8 @@ __pycache__/
 
 # 运行产物
 *.log
-*.xlsx
-charts_*/
+
+
 
 # IDE
 .idea/
