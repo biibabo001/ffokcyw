@@ -26,6 +26,7 @@ import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import NamedTuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 os.environ.setdefault("TQDM_DISABLE", "1")
@@ -117,6 +118,7 @@ P = {
     "sos_max_breakout_pct": 2.5,
     "sos_min_volume_ratio": 1.30,
     "sos_min_close_pos": 0.70,
+    "sos_failure_tolerance": 0.03,
 
     # LPS
     "lps_min_gap": 3,
@@ -124,6 +126,7 @@ P = {
     "lps_max_volume_ratio": 0.80,
     "lps_level_tolerance_pct": 3.0,
     "lps_current_max_distance_pct": 5.0,
+    "lps_failure_tolerance": 0.02,
 
     # Spring失效
     "spring_invalid_close_pct": 1.5,
@@ -285,7 +288,7 @@ def fetch_float_caps(codes, pause=0.15):
     return caps
 
 
-def normalize_history(df):
+def normalize_history(df, *, min_bars=MIN_BARS):
     """
     统一日线数据字段。
     """
@@ -383,6 +386,7 @@ def normalize_history(df):
     d = d[
         (d["close"] > 0)
         & (d["low"] > 0)
+        & (d["open"] > 0)
         & (d["volume"] >= 0)
     ]
 
@@ -391,7 +395,7 @@ def normalize_history(df):
             subset=["date"]
         )
 
-    if len(d) < MIN_BARS:
+    if len(d) < min_bars:
         return None
 
     return d.reset_index(drop=True)
@@ -579,87 +583,26 @@ def _find_trading_range(high, low, close, n):
         n - 40,
     )
 
-    for length in range(
-        max_len,
-        P["range_min_days"] - 1,
-        -1,
-    ):
+    starts = np.arange(n - max_len, n - P["range_min_days"] + 1)
+    if len(starts):
+        first_closes = close[starts[:, None] + np.arange(20)].mean(axis=1)
+        last_close = np.mean(close[-20:])
+        endpoint_change = np.abs(close[-1] / close[starts] - 1) * 100
+        internal_change = np.abs(last_close / first_closes - 1) * 100
+        starts = starts[
+            (endpoint_change <= P["range_max_endpoint_change_pct"])
+            & (internal_change <= P["range_max_internal_change_pct"])
+        ]
 
-        start = n - length
-
-        segment_high = high[start:]
-        segment_low = low[start:]
-        segment_close = close[start:]
-
-        range_low = float(
-            np.quantile(
-                segment_low,
-                0.10,
-            )
-        )
-
-        range_high = float(
-            np.quantile(
-                segment_high,
-                0.90,
-            )
-        )
-
-        if (
-            range_low <= 0
-            or range_high <= range_low
-        ):
+    for start in starts:
+        range_low = float(np.quantile(low[start:], 0.10))
+        range_high = float(np.quantile(high[start:], 0.90))
+        if range_low <= 0 or range_high <= range_low:
             continue
 
-        height_pct = (
-            range_high / range_low - 1
-        ) * 100
-
-        endpoint_change = abs(
-            (
-                segment_close[-1]
-                / segment_close[0]
-                - 1
-            ) * 100
-        )
-
-        first_close = float(
-            np.mean(segment_close[:20])
-        )
-
-        last_close = float(
-            np.mean(segment_close[-20:])
-        )
-
-        internal_change = (
-            abs(
-                (
-                    last_close
-                    / first_close
-                    - 1
-                ) * 100
-            )
-            if first_close > 0
-            else 999
-        )
-
-        if (
-            height_pct
-            <= P["range_max_height_pct"]
-            and endpoint_change
-            <= P["range_max_endpoint_change_pct"]
-            and internal_change
-            <= P["range_max_internal_change_pct"]
-        ):
-
-            range_info = (
-                start,
-                length,
-                range_low,
-                range_high,
-                height_pct,
-            )
-
+        height_pct = (range_high / range_low - 1) * 100
+        if height_pct <= P["range_max_height_pct"]:
+            range_info = (int(start), n - int(start), range_low, range_high, height_pct)
             break
 
     if range_info is None:
@@ -713,86 +656,6 @@ def _find_trading_range(high, low, close, n):
         range_height_pct,
         in_range,
     )
-
-
-def _detect_spring(close, high, low, opn, vol, support, range_start, n):
-    """识别 Spring：跌破支撑后当日收回、缩量、下影线明显。返回索引或 None。"""
-
-    spring_idx = None
-
-    begin = max(
-        range_start + 10,
-        n - P["spring_recent_days"],
-    )
-
-    for i in range(begin, n):
-
-        penetration_pct = (
-            (support - low[i])
-            / support
-            * 100
-        )
-
-        candle_range = max(
-            high[i] - low[i],
-            1e-9,
-        )
-
-        close_position = (
-            (close[i] - low[i])
-            / candle_range
-        )
-
-        previous_holds = (
-            close[i - 1]
-            >= support * 0.985
-        )
-
-        penetration_ok = (
-            P["spring_penetration_min_pct"]
-            <= penetration_pct
-            <= P["spring_penetration_max_pct"]
-        )
-
-        reclaim_support = (
-            close[i] >= support * 1.001
-        )
-
-        strong_close = (
-            close_position
-            >= P["spring_min_close_pos"]
-        )
-
-        base_volume = float(
-            np.mean(
-                vol[
-                    max(range_start, i - 20):i
-                ]
-            )
-        )
-
-        volume_ok = (
-            base_volume > 0
-            and vol[i]
-            <= base_volume
-            * P["spring_max_volume_vs_avg"]
-        )
-
-        candle_ok = (
-            close[i] >= opn[i] * 0.98
-        )
-
-        if (
-            previous_holds
-            and penetration_ok
-            and reclaim_support
-            and strong_close
-            and volume_ok
-            and candle_ok
-        ):
-            spring_idx = i
-
-    return spring_idx
 
 
 def _detect_test(close, high, low, vol, support, spring_idx, range_start, n):
@@ -969,104 +832,8 @@ def _check_spring_invalid(close, high, low, spring_idx, n):
     )
 
 
-def _detect_sos(close, high, low, vol, resistance, range_start, n, test_idx):
-    """识别 SOS：放量突破阻力、突破幅度适中、收盘强势。返回 (sos_idx, sos_volume_ratio, sos_spread)。"""
-
-    sos_idx = None
-    sos_volume_ratio = np.nan
-    sos_spread = np.nan
-
-    sos_begin = max(
-        range_start + 20,
-        n - P["sos_recent_days"],
-    )
-
-    for i in range(
-        sos_begin,
-        n,
-    ):
-
-        if (
-            test_idx is not None
-            and i <= test_idx
-        ):
-            continue
-
-        ref_volume = float(
-            np.mean(
-                vol[
-                    max(range_start, i - 20):i
-                ]
-            )
-        )
-
-        if ref_volume <= 0:
-            continue
-
-        candle_range = max(
-            high[i] - low[i],
-            1e-9,
-        )
-
-        close_position = (
-            (close[i] - low[i])
-            / candle_range
-        )
-
-        breakout = (
-            close[i]
-            >= resistance
-            * (
-                1
-                + P["sos_min_breakout_pct"]
-                / 100
-            )
-            and close[i]
-            <= resistance
-            * (
-                1
-                + P["sos_max_breakout_pct"]
-                / 100
-            )
-        )
-
-        volume_expansion = (
-            vol[i]
-            >= ref_volume
-            * P["sos_min_volume_ratio"]
-        )
-
-        strong_close = (
-            close_position
-            >= P["sos_min_close_pos"]
-        )
-
-        if (
-            breakout
-            and volume_expansion
-            and strong_close
-        ):
-
-            sos_idx = i
-            sos_volume_ratio = (
-                vol[i] / ref_volume
-            )
-            atr = _atr(
-                high[max(range_start, i - 13):i + 1],
-                low[max(range_start, i - 13):i + 1],
-                close[max(range_start, i - 13):i + 1],
-            )
-            sos_spread = (
-                (high[i] - low[i]) / atr
-                if atr > 0
-                else np.nan
-            )
-
-    return sos_idx, sos_volume_ratio, sos_spread
-
-
-def _detect_lps(close, high, low, vol, resistance, sos_idx, range_start, n):
-    """识别 LPS：SOS 后缩量回踩突破位。返回 (lps_idx, lps_volume_ratio)。"""
+def _detect_lps(close, low, vol, resistance, sos_idx, range_start, n):
+    """找出 SOS 后第一次缩量回踩，跟踪该次回踩直到确认或失效。"""
 
     lps_idx = None
     lps_volume_ratio = np.nan
@@ -1141,6 +908,7 @@ def _detect_lps(close, high, low, vol, resistance, sos_idx, range_start, n):
                 if vol[sos_idx] > 0
                 else np.nan
             )
+            break
 
     return lps_idx, lps_volume_ratio
 
@@ -1245,50 +1013,26 @@ def _compute_background(close, low, vol):
     )
 
 
-def detect_structure(df):
-    """
-    识别顺序：
+class RangeContext(NamedTuple):
+    range_start: int
+    range_days: int
+    range_low: float
+    range_high: float
+    range_height_pct: float
+    in_range: bool
+    decline_days: int
+    drawdown_pct: float
+    support: float
+    resistance: float
+    support_touches: int
+    resistance_touches: int
+    level_distance_pct: float
+    volume_contraction: float
+    range_quality: bool
 
-    交易区间
-        ↓
-    Spring
-        ↓
-    Test
-        ↓
-    SOS
-        ↓
-    LPS
 
-    不满足结构条件时，不会仅凭评分进入名单。
-    """
-
-    close = df["close"].to_numpy(
-        dtype=float
-    )
-
-    high = df["high"].to_numpy(
-        dtype=float
-    )
-
-    low = df["low"].to_numpy(
-        dtype=float
-    )
-
-    opn = df["open"].to_numpy(
-        dtype=float
-    )
-
-    vol = df["volume"].to_numpy(
-        dtype=float
-    )
-
-    n = len(close)
-
-    if n < MIN_BARS:
-        raise ValueError(
-            "历史K线数量不足"
-        )
-
+def _range_context(high, low, close, vol, end):
+    """用 end 之前的行情估计区间，end 为触发事件日或样本末尾。"""
     # --------------------------------------------------------
     # 1. 寻找交易区间
     (
@@ -1299,10 +1043,10 @@ def detect_structure(df):
         range_height_pct,
         in_range,
     ) = _find_trading_range(
-        high,
-        low,
-        close,
-        n,
+        high[:end],
+        low[:end],
+        close[:end],
+        end,
     )
 
     # 2. 前期下跌背景
@@ -1352,8 +1096,8 @@ def detect_structure(df):
     # 3. 支撑和阻力
     # --------------------------------------------------------
 
-    segment_low = low[range_start:]
-    segment_high = high[range_start:]
+    segment_low = low[range_start:end]
+    segment_high = high[range_start:end]
 
     low_pivots = local_pivots(
         segment_low,
@@ -1413,7 +1157,7 @@ def detect_structure(df):
     # 4. 成交量收缩
     # --------------------------------------------------------
 
-    segment_vol = vol[range_start:]
+    segment_vol = vol[range_start:end]
 
     third = max(
         10,
@@ -1453,22 +1197,130 @@ def detect_structure(df):
         and 5 <= level_distance_pct <= 30
     )
 
-    # --------------------------------------------------------
-    # 6. Spring
-    spring_idx = (
-        _detect_spring(
-            close,
-            high,
-            low,
-            opn,
-            vol,
-            support,
-            range_start,
-            n,
-        )
-        if range_quality
-        else None
+    return RangeContext(
+        range_start,
+        range_days,
+        range_low,
+        range_high,
+        range_height_pct,
+        in_range,
+        decline_days,
+        drawdown_pct,
+        support,
+        resistance,
+        support_touches,
+        resistance_touches,
+        level_distance_pct,
+        volume_contraction,
+        range_quality,
     )
+
+
+def detect_structure(df):
+    """
+    使用触发日前的交易区间分别识别 Spring → Test 和 SOS → LPS。
+    触发后的日线用于检查确认与失效。
+    """
+
+    close = df["close"].to_numpy(
+        dtype=float
+    )
+
+    high = df["high"].to_numpy(
+        dtype=float
+    )
+
+    low = df["low"].to_numpy(
+        dtype=float
+    )
+
+    opn = df["open"].to_numpy(
+        dtype=float
+    )
+
+    vol = df["volume"].to_numpy(
+        dtype=float
+    )
+
+    n = len(close)
+
+    if n < MIN_BARS:
+        raise ValueError(
+            "历史K线数量不足"
+        )
+
+    ranges = {}
+
+    def range_at(end):
+        if end not in ranges:
+            ranges[end] = _range_context(high, low, close, vol, end)
+        return ranges[end]
+
+    spread = np.maximum(high - low, 1e-9)
+    close_position = (close - low) / spread
+
+    spring_idx = None
+    spring_range = None
+    for i in range(n - 1, max(20, n - P["spring_recent_days"]) - 1, -1):
+        if close_position[i] < P["spring_min_close_pos"] or close[i] < opn[i] * 0.98:
+            continue
+        ref_volume = float(np.mean(vol[i - 20:i]))
+        if not 0 < vol[i] <= ref_volume * P["spring_max_volume_vs_avg"]:
+            continue
+        candidate = range_at(i)
+        if not candidate.range_quality:
+            continue
+        level = candidate.support
+        penetration_pct = (level - low[i]) / level * 100
+        if (
+            P["spring_penetration_min_pct"] <= penetration_pct <= P["spring_penetration_max_pct"]
+            and close[i - 1] >= level * 0.985
+            and close[i] >= level * 1.001
+        ):
+            spring_idx, spring_range = i, candidate
+            break
+
+    sos_idx = None
+    sos_range = None
+    sos_volume_ratio = np.nan
+    sos_spread = np.nan
+    for i in range(n - 1, max(20, n - P["sos_recent_days"]) - 1, -1):
+        if close_position[i] < P["sos_min_close_pos"] or close[i] <= close[i - 1]:
+            continue
+        ref_volume = float(np.mean(vol[i - 20:i]))
+        if ref_volume <= 0 or vol[i] < ref_volume * P["sos_min_volume_ratio"]:
+            continue
+        candidate = range_at(i)
+        if not candidate.range_quality:
+            continue
+        level = candidate.resistance
+        breakout_min = level * (1 + P["sos_min_breakout_pct"] / 100)
+        breakout_max = level * (1 + P["sos_max_breakout_pct"] / 100)
+        if close[i - 1] < breakout_min <= close[i] <= breakout_max:
+            sos_idx, sos_range = i, candidate
+            sos_volume_ratio = vol[i] / ref_volume
+            atr = _atr(high[:i], low[:i], close[:i])
+            sos_spread = (high[i] - low[i]) / atr if atr > 0 else np.nan
+            break
+
+    # Spring 和 SOS 各用触发日前的边界；主区间优先展示 Spring 的区间。
+    (
+        range_start,
+        range_days,
+        range_low,
+        range_high,
+        range_height_pct,
+        in_range,
+        decline_days,
+        drawdown_pct,
+        support,
+        resistance,
+        support_touches,
+        resistance_touches,
+        level_distance_pct,
+        volume_contraction,
+        range_quality,
+    ) = spring_range or sos_range or range_at(n)
 
     # 7. Test
     if spring_idx is not None:
@@ -1581,76 +1433,36 @@ def detect_structure(df):
         and close_now >= support * 0.99
     )
 
-    # --------------------------------------------------------
-    # 12. SOS
-    if range_quality and resistance > 0:
-        (
-            sos_idx,
-            sos_volume_ratio,
-            sos_spread,
-        ) = _detect_sos(
-            close,
-            high,
-            low,
-            vol,
-            resistance,
-            range_start,
-            n,
-            test_idx,
-        )
-    else:
-        sos_idx = None
-        sos_volume_ratio = np.nan
-        sos_spread = np.nan
+    # SOS 任何一天有效跌回区间都使本次突破失效。
+    sos_resistance = sos_range.resistance if sos_range else np.nan
+    sos_failed = sos_idx is not None and bool(np.any(
+        close[sos_idx + 1:] < sos_resistance * (1 - P["sos_failure_tolerance"])
+    ))
+    sos_valid = sos_idx is not None and not sos_failed and bool(np.any(
+        close[sos_idx + 1:] >= sos_resistance
+    ))
 
-    # 13. LPS
+    lps_idx = None
+    lps_volume_ratio = np.nan
+    lps_status = ""
     if sos_idx is not None:
-        (
-            lps_idx,
-            lps_volume_ratio,
-        ) = _detect_lps(
-            close,
-            high,
-            low,
-            vol,
-            resistance,
-            sos_idx,
-            range_start,
-            n,
+        lps_idx, lps_volume_ratio = _detect_lps(
+            close, low, vol, sos_resistance, sos_idx, sos_range.range_start, n,
         )
-    else:
-        lps_idx = None
-        lps_volume_ratio = np.nan
+        if lps_idx is not None:
+            later = close[lps_idx + 1:]
+            if sos_failed or np.any(later < low[lps_idx] * (1 - P["lps_failure_tolerance"])):
+                lps_status = "失效"
+            elif np.any(later > max(high[lps_idx], sos_resistance)):
+                lps_status = "已确认"
+            else:
+                lps_status = "观察中"
 
-    lps_distance = (
-        pct(
-            close_now,
-            resistance,
-        )
-        if lps_idx is not None
-        else np.nan
-    )
-
-    lps_valid = bool(
-        range_quality
-        and sos_idx is not None
-        and lps_idx is not None
-        and lps_idx > sos_idx
-        and close_now >= resistance * 0.97
-        and close_now
-        <= resistance
-        * (
-            1
-            + P["lps_current_max_distance_pct"]
-            / 100
-        )
-        and close_now >= low[lps_idx] * 0.98
-    )
-
-    # SOS 有效性：突破后未明显跌回阻力位下方（排除单日假突破）
-    sos_valid = bool(
-        sos_idx is not None
-        and close_now >= resistance * 0.97
+    lps_distance = pct(close_now, sos_resistance) if lps_idx is not None else np.nan
+    lps_valid = (
+        sos_valid
+        and lps_status == "已确认"
+        and -100 * P["sos_failure_tolerance"] <= lps_distance <= P["lps_current_max_distance_pct"]
     )
 
     # 14. MACD和均线
@@ -1738,6 +1550,11 @@ def detect_structure(df):
             "尚未形成合格Spring Test"
         )
 
+    if sos_failed:
+        reasons.append("SOS突破失效")
+    if lps_status in ("观察中", "失效"):
+        reasons.append(f"LPS{lps_status}")
+
     if not range_quality:
         reasons.append(
             "交易区间未通过结构硬过滤"
@@ -1754,6 +1571,7 @@ def detect_structure(df):
 
     return {
         "range_start": int(range_start),
+        "range_end": range_start + range_days - 1 if in_range else None,
         "range_days": int(range_days),
         "range_low": float(range_low),
         "range_high": float(range_high),
@@ -1888,6 +1706,8 @@ def detect_structure(df):
         "sos_valid": bool(
             sos_valid
         ),
+        "sos_resistance": float(sos_resistance),
+        "lps_status": lps_status,
 
         "lps_distance_pct": float(
             lps_distance
@@ -2008,7 +1828,7 @@ def score_lists(x):
 
     lps_score = (
         add(x["range_quality"], "lps_range")
-        + add(x["sos"], "lps_sos")
+        + add(x["sos_valid"], "lps_sos")
         + add(x["lps_valid"], "lps_valid")
         + add(
             np.isfinite(x["lps_volume_ratio"])
@@ -2051,6 +1871,16 @@ def score_lists(x):
 # ============================================================
 # 七、单只股票分析
 # ============================================================
+
+def classify_passes(x, spring_score, early_score, lps_score):
+    """选股、诊股和回测共用的入选规则。"""
+    threshold = P["score_threshold"]
+    return {
+        "main": x["main_spring_test"] and spring_score >= threshold,
+        "early": x["early_spring"] and early_score >= threshold,
+        "lps": x["sos_valid"] and x["lps_valid"] and lps_score >= threshold,
+    }
+
 
 def analyze_one(code, name):
 
@@ -2110,6 +1940,8 @@ def analyze_one(code, name):
             "SOS_volume_ratio": x["sos_volume_ratio"],
 
             "LPS": x["lps"],
+            "LPS_status": x["lps_status"],
+            "SOS_resistance": x["sos_resistance"],
             "LPS_date": x["lps_date"],
             "LPS_volume_ratio": x["lps_volume_ratio"],
             "LPS_distance_pct": x["lps_distance_pct"],
@@ -2128,24 +1960,10 @@ def analyze_one(code, name):
 
             "exclude_reasons": x["exclude_reasons"],
 
-            "_main_pass": (
-                x["range_quality"]
-                and x["main_spring_test"]
-                and spring_score >= P["score_threshold"]
-            ),
-
-            "_early_pass": (
-                x["range_quality"]
-                and x["early_spring"]
-                and early_score >= P["score_threshold"]
-            ),
-
-            "_lps_pass": (
-                x["range_quality"]
-                and x["sos_valid"]
-                and x["lps_valid"]
-                and lps_score >= P["score_threshold"]
-            ),
+            **{
+                f"_{name}_pass": passed
+                for name, passed in classify_passes(x, spring_score, early_score, lps_score).items()
+            },
         }
 
         return row
@@ -2286,12 +2104,16 @@ def draw_chart(code, name, out_dir):
             label="Resistance",
         )
 
+        if x["sos"] and not np.isclose(x["sos_resistance"], x["resistance"]):
+            ax.axhline(x["sos_resistance"], linestyle=":", linewidth=0.9, label="SOS level")
+
         # 事件标注
+        lps_label = {"已确认": "LPS confirmed", "观察中": "LPS watching", "失效": "LPS failed"}
         events = [
             ("Spring", x["spring_idx"]),
             ("Test", x["test_idx"]),
             ("SOS", x["sos_idx"]),
-            ("LPS", x["lps_idx"]),
+            (lps_label.get(x["lps_status"], "LPS"), x["lps_idx"]),
         ]
 
         for label, idx in events:
@@ -2424,7 +2246,9 @@ def export_excel(
         "SOS_date": "SOS日期",
         "SOS_volume_ratio": "SOS量能/前20日均量",
 
-        "LPS": "LPS候选",
+        "LPS": "LPS确认且位置合格",
+        "LPS_status": "LPS状态",
+        "SOS_resistance": "SOS突破位",
         "LPS_date": "LPS日期",
         "LPS_volume_ratio": "LPS量能/SOS量能",
         "LPS_distance_pct": "现价距阻力%",

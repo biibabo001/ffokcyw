@@ -11,6 +11,17 @@ import sys
 import requests
 import pandas as pd
 from datetime import datetime, timedelta
+import wyckoff_screen as screen
+
+
+BAR_COLUMNS = {
+    "date": "日期",
+    "open": "开盘",
+    "close": "收盘",
+    "high": "最高",
+    "low": "最低",
+    "volume": "成交量",
+}
 
 # 国内行情源（东财/腾讯）走直连：系统代理(Clash)会把东财流量导向坏节点，导致连接被重置
 _no_proxy = os.environ.get('NO_PROXY', '')
@@ -57,28 +68,27 @@ def get_stock_data(stock_code, days=250):
     """获取股票K线数据(腾讯数据源)"""
     try:
         symbol = _to_tencent_symbol(stock_code)
-        start = (datetime.now() - timedelta(days=730)).strftime("%Y%m%d")
+        now = datetime.now()
+        start = (now - timedelta(days=screen.HISTORY_DAYS)).strftime("%Y%m%d")
         df = ak.stock_zh_a_hist_tx(
             symbol=symbol,
             start_date=start,
-            end_date="20500101",
+            end_date=now.strftime("%Y%m%d"),
             adjust="qfq",
         )
-        if df is None or len(df) == 0:
+        df = screen.normalize_history(df, min_bars=1)
+        if df is None:
             return None
-        df = df.rename(columns={
-            "date": "日期",
-            "open": "开盘",
-            "close": "收盘",
-            "high": "最高",
-            "low": "最低",
-            "volume": "成交量",
-        }).tail(days).reset_index(drop=True)
+        df = df.rename(columns=BAR_COLUMNS)
+        if days is not None:
+            df = df.tail(days).reset_index(drop=True)
         # 当日日线尚未结算时，用实时行情补上今天这根 bar，避免显示昨天收盘价
-        if df["日期"].iloc[-1] < datetime.now().date():
+        if df["日期"].iloc[-1].date() < now.date():
             bar = _fetch_realtime_bar(stock_code)
             if bar:
+                bar["日期"] = pd.Timestamp(bar["日期"])
                 df = pd.concat([df, pd.DataFrame([bar])], ignore_index=True)
+                df.attrs["has_realtime_bar"] = True
         return df
     except Exception as e:
         print(f"Error fetching data: {e}", file=sys.stderr)
@@ -576,10 +586,24 @@ def generate_diagnosis(stock_code):
     """生成完整诊股报告"""
     print(f"正在获取 {stock_code} 数据...", file=sys.stderr)
 
-    df = get_stock_data(stock_code)
-    if df is None:
+    data = get_stock_data(stock_code, days=None)
+    if data is None:
         return {"error": f"无法获取 {stock_code} 的数据"}
 
+    has_realtime = data.attrs.get("has_realtime_bar", False)
+    history = data.iloc[:-1] if has_realtime else data
+    screen_signals = None
+    if len(history) >= screen.MIN_BARS:
+        history = history.rename(columns={name: key for key, name in BAR_COLUMNS.items()})
+        structure = screen.detect_structure(history)
+        scores = screen.score_lists(structure)
+        screen_signals = {
+            "passes": screen.classify_passes(structure, *scores),
+            "scores": scores,
+            "lps_status": structure["lps_status"],
+        }
+
+    df = data.tail(250 + int(has_realtime)).reset_index(drop=True)
     # 基本信息
     stock_name = get_stock_name(stock_code)
 
@@ -610,6 +634,7 @@ def generate_diagnosis(stock_code):
         "volume_profile_60": volume_profile_60,
         "volume_profile_120": volume_profile_120,
         "wyckoff_analysis": wyckoff,
+        "screen_signals": screen_signals,
         "risk_reward": risk_reward,
         "weis_wave": weis_wave,
         "historical_signals": historical_signals,
@@ -687,6 +712,15 @@ def print_report(result):
         print(f"   区间幅度: {wa['range_width_pct']}%")
         print(f"   创新高: {'是' if wa['making_higher_highs'] else '否'} | 创新低: {'是' if wa['making_lower_lows'] else '否'}")
     
+    signals = result.get("screen_signals")
+    if signals is not None:
+        labels = {"main": "Spring+Test", "early": "Spring早期", "lps": "LPS"}
+        print("\n   选股名单判定（日线）")
+        for (key, passed), score in zip(signals["passes"].items(), signals["scores"]):
+            print(f"   {labels[key]}  {score}分  {'入选' if passed else '未入选'}")
+        if signals["lps_status"]:
+            print(f"   LPS状态  {signals['lps_status']}")
+
     # Weis Wave
     if result['weis_wave']:
         ww = result['weis_wave']

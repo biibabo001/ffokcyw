@@ -3,5 +3,12 @@ name = "wyckoff"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "pandas>=3.1.1",
+    "akshare>=1.20.36",
+    "numpy>=1.26",
+    "openpyxl>=3.1",
+    "pandas>=2.2.2",
+    "requests>=2.32",
 ]
+
+[project.optional-dependencies]
+charts = ["matplotlib>=3.8"]

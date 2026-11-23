@@ -4,7 +4,7 @@
 回测 wyckoff_screen 三个名单在历史时点的后续表现。
 
 原理：对每只股票，在其自身历史中取多个"时点快照"，每个快照只用该时点之前的数据
-跑 detect_structure + score_lists 分类，再统计分类后持有 N 个交易日的收益。
+使用选股器的规则分类，并从下一根日线开盘到第 N 根日线收盘计算收益。
 （与 wyckoff_screen.analyze_one 的过选判定保持一致）
 
 用法:
@@ -18,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -25,21 +26,11 @@ sys.path.insert(0, str(ROOT))
 import wyckoff_screen as ws
 
 
-def classify_passes(x, spring_score, early_score, lps_score):
-    """与 wyckoff_screen.analyze_one 一致的三个名单过选判定。"""
-    threshold = ws.P["score_threshold"]
-    return {
-        "main": x["range_quality"] and x["main_spring_test"] and spring_score >= threshold,
-        "early": x["range_quality"] and x["early_spring"] and early_score >= threshold,
-        "lps": x["range_quality"] and x["sos"] and x["lps_valid"] and lps_score >= threshold,
-    }
-
-
 def backtest_stock(hist, snapshots, horizon):
     """对单只股票在多个历史时点做回测。返回 [(flags, fwd_return), ...]。"""
     n = len(hist)
-    usable = n - horizon - ws.MIN_BARS
-    if usable <= 0:
+    usable = n - horizon - ws.MIN_BARS + 1
+    if usable < 1:
         return []
 
     spacing = max(1, usable // snapshots)
@@ -52,15 +43,10 @@ def backtest_stock(hist, snapshots, horizon):
 
         sub = hist.iloc[:as_of_idx + 1].reset_index(drop=True)
 
-        try:
-            x = ws.detect_structure(sub)
-        except Exception:
-            continue
+        x = ws.detect_structure(sub)
+        flags = ws.classify_passes(x, *ws.score_lists(x))
 
-        spring_score, early_score, lps_score = ws.score_lists(x)
-        flags = classify_passes(x, spring_score, early_score, lps_score)
-
-        entry = float(hist["close"].iloc[as_of_idx])
+        entry = float(hist["open"].iloc[as_of_idx + 1])
         exit_ = float(hist["close"].iloc[as_of_idx + horizon])
         fwd = exit_ / entry - 1
 
@@ -69,8 +55,11 @@ def backtest_stock(hist, snapshots, horizon):
     return out
 
 
-def _work(code, snapshots, horizon):
-    hist = ws.fetch_history(code)
+def _work(code, snapshots, horizon, cache_only):
+    if cache_only:
+        hist = ws.normalize_history(pd.read_csv(ws.CACHE_DIR / f"{code}.csv"))
+    else:
+        hist = ws.fetch_history(code)
     if hist is None:
         return None
     return backtest_stock(hist, snapshots, horizon)
@@ -85,8 +74,12 @@ def main():
     parser.add_argument("--no-cap-filter", action="store_true", help="跳过流通市值过滤")
     parser.add_argument("--min-cap", type=float, default=ws.CAP_MIN)
     parser.add_argument("--max-cap", type=float, default=ws.CAP_MAX)
-    parser.add_argument("--no-cache", action="store_true", help="忽略本地缓存")
+    cache = parser.add_mutually_exclusive_group()
+    cache.add_argument("--no-cache", action="store_true", help="忽略本地缓存")
+    cache.add_argument("--cache-only", action="store_true", help="离线使用现有缓存，不筛选市值")
     args = parser.parse_args()
+    if args.snapshots < 1 or args.horizon < 1:
+        parser.error("--snapshots 和 --horizon 必须为正整数")
 
     ws.USE_CACHE = not args.no_cache
 
@@ -94,22 +87,25 @@ def main():
     print(f"  Wyckoff 名单回测 | 快照 {args.snapshots} | 持有 {args.horizon} 交易日")
     print("=" * 66)
 
-    stocks = ws.get_stock_universe()
-    print(f"  主板非ST：{len(stocks)} 只")
-
-    if args.no_cap_filter:
-        universe = stocks
+    if args.cache_only:
+        universe = [(path.stem, "") for path in sorted(ws.CACHE_DIR.glob("*.csv"))]
+        if not universe:
+            parser.error("本地没有行情缓存")
+        print("  股票池：本地缓存，未应用市值过滤")
     else:
-        print("  获取流通市值...")
-        caps = ws.fetch_float_caps([c for c, _ in stocks])
-        universe = [
-            (c, n) for c, n in stocks
-            if c in caps and args.min_cap <= caps[c] <= args.max_cap
-        ]
-    print(f"  纳入回测：{len(universe)} 只")
+        universe = ws.get_stock_universe()
+        print("  股票池：运行时的主板非ST股票")
+        if not args.no_cap_filter:
+            print("  市值过滤：运行时的流通市值")
+            caps = ws.fetch_float_caps([c for c, _ in universe])
+            universe = [
+                (c, n) for c, n in universe
+                if c in caps and args.min_cap <= caps[c] <= args.max_cap
+            ]
 
     if args.limit > 0:
         universe = universe[:args.limit]
+    print(f"  纳入回测：{len(universe)} 只")
 
     samples = {"main": [], "early": [], "lps": []}
     bench = []
@@ -118,12 +114,16 @@ def main():
 
     with ThreadPoolExecutor(max_workers=max(1, args.threads)) as pool:
         futures = {
-            pool.submit(_work, c, args.snapshots, args.horizon): c
+            pool.submit(_work, c, args.snapshots, args.horizon, args.cache_only): c
             for c, _ in universe
         }
         for fut in as_completed(futures):
             done += 1
-            r = fut.result()
+            try:
+                r = fut.result()
+            except Exception:
+                ws.LOG.exception("%s 回测失败", futures[fut])
+                r = None
             if r is None:
                 failed += 1
             else:
@@ -162,12 +162,12 @@ def main():
     b = stats(bench)
     if b:
         print(
-            f"  {'全市场基准':<14}{b['n']:>7}{b['win']:>8.1f}%{b['avg']:>10.2f}%{b['med']:>10.2f}%"
+            f"  {'全部快照':<14}{b['n']:>7}{b['win']:>8.1f}%{b['avg']:>10.2f}%{b['med']:>10.2f}%"
         )
 
     print(
         f"\n  说明：胜率=持有{args.horizon}交易日收益>0的样本占比；"
-        "样本来自各历史时点快照（每个时点只用当时可见的数据，避免未来函数）。"
+        "从信号后首根日线开盘到第 N 根日线收盘。未模拟涨跌停、停牌成交限制和交易费用。"
     )
 
 

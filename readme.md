@@ -9,6 +9,7 @@ wyckoff/
 ├── main.py               # 统一入口：screen（选股）+ diagnose（诊股）
 ├── wyckoff_screen.py     # 威科夫 4.1 选股（主工具，三个名单）
 ├── diagnose.py           # 单股诊股（可独立运行）
+├── backtest.py           # 历史快照和后续收益统计
 ├── pyproject.toml        # 项目配置（uv 管理）
 ├── uv.lock
 └── readme.md
@@ -20,9 +21,9 @@ wyckoff/
 - 依赖：`akshare` `pandas` `numpy` `requests` `openpyxl`（K 线图可选 `matplotlib`）
 
 ```bash
-pip install akshare pandas numpy requests openpyxl
-# 可选：生成 K 线图
-pip install matplotlib
+uv sync
+# 需要生成 K 线图时
+uv sync --extra charts
 ```
 
 ## 快速开始
@@ -68,14 +69,24 @@ python diagnose.py 601985
 
 - 范围：沪深主板（600/601/603/605、000/001/002/003），排除 ST/退市，流通市值 30~300 亿
 - 结构硬过滤先于评分；结构失效或价格偏离不靠高分进名单
+- Spring 和 SOS 各自用触发日之前的日线确定支撑和阻力。后续日线用于验证结构是否延续。
 - 输出**三个独立名单**：
   1. **Spring+Test 主名单**：Spring 假跌破 → 明确反弹 → 缩量回踩（Test）
   2. **Spring 早期观察**：Spring 事件较新、尚无 Test
-  3. **LPS 备选**：SOS 放量突破后回踩突破位的缩量确认
+  3. **LPS 备选**：SOS 放量突破并站稳，首次缩量回踩后再走强才入选。全量结果同时保留观察中、已确认和失效状态。
+
+### 历史快照回测
+
+```bash
+# 用现有行情缓存离线验证，跳过市值过滤
+uv run python backtest.py --cache-only --limit 60 --snapshots 4 --horizon 10
+```
+
+快照和当日选股共用入选规则。收益从信号后一根日线开盘算到第 N 根日线收盘，未计交易成本或成交限制。联网运行默认使用运行时的股票池和流通市值，离线运行使用缓存中的股票。统计结果会受到样本范围影响。
 
 ## 输出产物
 
-- `wyckoff_screen_4_1_YYYYMMDD.xlsx`：Excel 结果（选股名单/排除名单/全量扫描/参数说明 5 个 sheet）
+- `wyckoff_screen_4_1_YYYYMMDD.xlsx`：三个选股名单、排除名单、全量扫描和扫描说明
 - `charts_YYYYMMDDHH_MM/`：入选股票的 K 线图（带支撑/阻力线 + Spring/Test/SOS/LPS 事件标注）
 - `wyckoff_screen.log`：运行日志
 
