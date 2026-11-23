@@ -1,13 +1,14 @@
 # Wyckoff A股分析工具
 
-基于威科夫（Wyckoff）方法论的个人 A 股分析工具集，包含**全市场早期吸筹选股**和**单股诊股**两大功能。规则型初筛工具，结果需人工看图复核，不构成投资建议。
+基于威科夫（Wyckoff）方法论的个人 A 股分析工具集，支持**全市场早期吸筹选股**、**深跌后横盘筛选**和**单股诊股**。规则型初筛工具，结果需人工看图复核，不构成投资建议。
 
 ## 项目结构
 
 ```
 wyckoff/
-├── main.py               # 统一入口：screen（选股）+ diagnose（诊股）
+├── main.py               # 统一入口：screen、base、diagnose
 ├── wyckoff_screen.py     # 威科夫 4.1 选股（主工具，三个名单）
+├── bottom_base.py        # 深跌后横盘筛选
 ├── diagnose.py           # 单股诊股（可独立运行）
 ├── backtest.py           # 历史快照和后续收益统计
 ├── pyproject.toml        # 项目配置（uv 管理）
@@ -51,6 +52,30 @@ python main.py diagnose 中国核电
 # 或直接运行
 python diagnose.py 601985
 ```
+
+### 深跌后横盘（吉视传媒模板）
+
+在项目目录运行。首次使用先执行上面的环境安装步骤。
+
+```powershell
+# 离线扫描 cache/ 里的全部日线缓存
+uv run python -X utf8 main.py base --cache-only
+
+# 联网扫描沪深主板非 ST 股票
+uv run python -X utf8 main.py base --threads 5
+
+# 离线复查单只股票，例如吉视传媒或电投产融
+uv run python -X utf8 main.py base --cache-only --code 601929
+uv run python -X utf8 main.py base --cache-only --code 000958
+```
+
+如果 Windows 上已创建项目的 `.venv`，也可以直接运行：
+
+```powershell
+.\.venv\Scripts\python.exe -X utf8 main.py base --cache-only
+```
+
+该入口筛选大涨、长期深跌后逐步趋稳的股票，要求至少 60 根日线的底部整理，且收盘价在区间两端至少完成两次往返。候选名单直接显示在终端，包括估计的横盘起点、主要收盘区间、往返次数和行情日期。离线模式的行情新旧取决于本地缓存。`base` 不要求 Spring、Test 或 SOS，也不应用 `screen` 的流通市值过滤。需要原来的三个名单和 Excel 时，使用上面的 `screen` 命令。
 
 ## 选股参数
 

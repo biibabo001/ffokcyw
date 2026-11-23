@@ -4,13 +4,14 @@ import numpy as np
 import pandas as pd
 
 import backtest
+from bottom_base import count_round_trips
 import wyckoff_screen as screen
 
 
 def history_with_range():
     close = np.concatenate([
-        np.full(100, 125.0),
-        np.linspace(125, 105, 40),
+        np.linspace(126, 130, 100),
+        np.linspace(130, 105, 40),
         105 + 4 * np.sin(np.arange(180) * np.pi / 6),
     ])
     return pd.DataFrame({
@@ -32,6 +33,52 @@ def append_bars(history, rows):
 
 
 class StructureTests(unittest.TestCase):
+    def test_bottom_base_requires_repeated_traversals(self):
+        self.assertEqual(count_round_trips(np.linspace(12, 10, 90), 10, 12), 0)
+        drift_then_bounce = np.r_[np.linspace(12, 10, 60), np.linspace(10, 11, 30)]
+        self.assertEqual(count_round_trips(drift_then_bounce, 10, 12), 0)
+        prices = np.repeat([10, 11, 12, 11, 10, 11, 12, 11, 10], 5)
+        self.assertEqual(count_round_trips(prices, 10, 12), 2)
+
+    def test_range_cannot_include_a_sustained_support_break(self):
+        history = history_with_range()
+        for days_below, expected in [(1, True), (5, False)]:
+            with self.subTest(days_below=days_below):
+                candidate = history.copy()
+                candidate.loc[215:214 + days_below, ["open", "high", "low", "close"]] = [
+                    95.0, 95.4, 94.6, 95.0,
+                ]
+                result = screen.detect_structure(candidate)
+                self.assertTrue(result["in_range"])
+                self.assertEqual(result["range_quality"], expected)
+
+    def test_prior_drawdown_uses_two_years_before_range_start(self):
+        history = history_with_range()
+        close = np.r_[np.full(550, 115.0), history["close"].to_numpy()]
+        high, low = close + 0.4, close - 0.4
+        dates = pd.bdate_range("2023-01-02", periods=len(close))
+        range_start = len(close) - 180
+        high[range_start - 540] = 250.0  # 在两年前，不能作为高点。
+        high[range_start - 300] = 150.0  # 超过旧的 120 根日线上限。
+        opening_level = np.median(close[range_start:range_start + 5])
+
+        context = screen._range_context(
+            high, low, close, np.full(len(close), 100.0), len(close), dates,
+        )
+        self.assertEqual(context.range_start, range_start)
+        self.assertEqual(context.decline_days, 300)
+        self.assertAlmostEqual(context.drawdown_pct, (opening_level / 150 - 1) * 100)
+        self.assertTrue(context.range_quality)
+
+    def test_round_trip_rally_is_not_one_stable_range(self):
+        close = np.repeat([100.0, 118.0, 100.0], [100, 60, 80])
+        start, days, _, _, _, found = screen._find_trading_range(
+            close + 0.4, close - 0.4, close, len(close),
+        )
+        self.assertTrue(found)
+        self.assertLess(days, 180)
+        self.assertGreater(start, 100)
+
     def test_sos_and_lps_do_not_move_the_breakout_level(self):
         history = history_with_range()
         breakout = len(history)

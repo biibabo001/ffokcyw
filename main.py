@@ -3,6 +3,7 @@
 
 用法:
   python main.py screen [参数]          # 全市场威科夫选股（转发到 wyckoff_screen.py）
+  python main.py base [参数]            # 大涨、深跌后横盘的股票
   python main.py diagnose <代码或名称>   # 单只股票诊股
 
 示例:
@@ -39,6 +40,7 @@ ROOT = Path(__file__).parent
 
 USAGE = """用法:
   python main.py screen [参数]          # 全市场威科夫选股（转发到 wyckoff_screen.py）
+  python main.py base [参数]            # 大涨、深跌后横盘的股票
   python main.py diagnose <代码或名称>   # 单只股票诊股
 """
 
@@ -116,6 +118,9 @@ def main():
 
     if cmd == 'screen':
         run_screen(rest)
+    elif cmd == 'base':
+        from bottom_base import main as scan_bottom_base
+        scan_bottom_base(rest)
     elif cmd == 'diagnose':
         if not rest:
             raise SystemExit('用法: python main.py diagnose <股票代码或名称>')

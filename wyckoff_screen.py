@@ -57,7 +57,8 @@ MAIN_PREFIXES = (
     "000", "001", "002", "003",
 )
 
-HISTORY_DAYS = 730
+# 行情还要覆盖交易区间及其后的事件，为前期高点留足两年回看。
+HISTORY_DAYS = 4 * 366
 MIN_BARS = 250
 
 CAP_MIN = 30.0
@@ -78,13 +79,15 @@ P = {
     "support_tolerance": 0.03,
     "resistance_tolerance": 0.03,
     "support_min_touches": 3,
+    "sos_support_min_touches": 2,
     "resistance_min_touches": 3,
+    "range_support_break_days": 3,
 
-    # 前期下跌背景（理想区间 15%~40%：过小=中继整理，过大=超跌）
+    # 前期下跌背景
     "min_prior_drawdown_pct": 15.0,
-    "max_prior_drawdown_pct": 40.0,
+    "max_prior_drawdown_pct": 60.0,
     "decline_min_days": 30,
-    "decline_max_days": 120,
+    "decline_lookback_years": 2,
 
     # Spring
     "spring_recent_days": 30,
@@ -407,33 +410,30 @@ def fetch_history(code):
     """
 
     cache_path = CACHE_DIR / f"{code}.csv"
+    today = datetime.now().date()
+    start_day = today - timedelta(days=HISTORY_DAYS)
 
     if USE_CACHE and cache_path.exists():
         try:
-            mtime = datetime.fromtimestamp(cache_path.stat().st_mtime)
-            if mtime.strftime("%Y%m%d") == datetime.now().strftime("%Y%m%d"):
+            mtime = datetime.fromtimestamp(cache_path.stat().st_mtime).date()
+            if mtime == today:
                 cached = pd.read_csv(cache_path)
-                if "date" in cached.columns:
-                    cached["date"] = pd.to_datetime(
-                        cached["date"], errors="coerce"
-                    )
-                if len(cached) >= MIN_BARS:
-                    return cached.reset_index(drop=True)
+                if (
+                    not cached.empty
+                    and "history_request_start" in cached.columns
+                    and cached["history_request_start"].iat[0] == start_day.isoformat()
+                ):
+                    cached = normalize_history(cached)
+                    if cached is not None:
+                        return cached
         except Exception:
             pass
-
-    start = (
-        datetime.now()
-        - timedelta(days=HISTORY_DAYS)
-    ).strftime("%Y%m%d")
-
-    end = datetime.now().strftime("%Y%m%d")
 
     try:
         raw = ak.stock_zh_a_hist_tx(
             symbol=tencent_symbol(code),
-            start_date=start,
-            end_date=end,
+            start_date=start_day.strftime("%Y%m%d"),
+            end_date=today.strftime("%Y%m%d"),
             adjust="qfq",
         )
 
@@ -451,7 +451,9 @@ def fetch_history(code):
     if hist is not None and USE_CACHE:
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            hist.to_csv(cache_path, index=False, encoding="utf-8")
+            hist.assign(history_request_start=start_day.isoformat()).to_csv(
+                cache_path, index=False, encoding="utf-8",
+            )
         except Exception:
             pass
 
@@ -585,10 +587,12 @@ def _find_trading_range(high, low, close, n):
 
     starts = np.arange(n - max_len, n - P["range_min_days"] + 1)
     if len(starts):
-        first_closes = close[starts[:, None] + np.arange(20)].mean(axis=1)
-        last_close = np.mean(close[-20:])
+        smoothed = np.lib.stride_tricks.sliding_window_view(close[starts[0]:], 20).mean(axis=1)
+        window_starts = starts - starts[0]
+        highest = np.maximum.accumulate(smoothed[::-1])[::-1][window_starts]
+        lowest = np.minimum.accumulate(smoothed[::-1])[::-1][window_starts]
         endpoint_change = np.abs(close[-1] / close[starts] - 1) * 100
-        internal_change = np.abs(last_close / first_closes - 1) * 100
+        internal_change = (highest / lowest - 1) * 100
         starts = starts[
             (endpoint_change <= P["range_max_endpoint_change_pct"])
             & (internal_change <= P["range_max_internal_change_pct"])
@@ -1028,10 +1032,20 @@ class RangeContext(NamedTuple):
     resistance_touches: int
     level_distance_pct: float
     volume_contraction: float
-    range_quality: bool
+    opens_near_range: bool
+    support_held: bool
+    base_quality: bool
+
+    @property
+    def range_quality(self):
+        return self.base_quality and self.support_touches >= P["support_min_touches"]
+
+    @property
+    def sos_range_quality(self):
+        return self.base_quality and self.support_touches >= P["sos_support_min_touches"]
 
 
-def _range_context(high, low, close, vol, end):
+def _range_context(high, low, close, vol, end, dates=None):
     """用 end 之前的行情估计区间，end 为触发事件日或样本末尾。"""
     # --------------------------------------------------------
     # 1. 寻找交易区间
@@ -1052,45 +1066,20 @@ def _range_context(high, low, close, vol, end):
     # 2. 前期下跌背景
     # --------------------------------------------------------
 
-    if range_start >= 30:
-
-        prior_high = float(
-            np.max(
-                high[:range_start]
-            )
-        )
-
-        prior_high_idx = int(
-            np.argmax(
-                high[:range_start]
-            )
-        )
-
+    opening_level = float(np.median(close[range_start:range_start + 5]))
+    lookback_years = P["decline_lookback_years"]
+    if dates is None:
+        prior_start = max(0, range_start - 252 * lookback_years)
     else:
-
-        prior_high = float(
-            np.max(
-                high[:max(1, range_start + 1)]
-            )
-        )
-
-        prior_high_idx = int(
-            np.argmax(
-                high[:max(1, range_start + 1)]
-            )
-        )
-
-    decline_days = range_start - prior_high_idx
-
-    drawdown_pct = (
-        (
-            close[range_start]
-            / prior_high
-            - 1
-        ) * 100
-        if prior_high > 0
-        else 0
-    )
+        cutoff = dates[range_start] - pd.DateOffset(years=lookback_years)
+        prior_start = dates.searchsorted(cutoff)
+    prior_highs = high[prior_start:range_start]
+    decline_days = 0
+    drawdown_pct = 0.0
+    if len(prior_highs):
+        peak_offset = int(np.argmax(prior_highs))
+        decline_days = len(prior_highs) - peak_offset
+        drawdown_pct = pct(opening_level, prior_highs[peak_offset])
 
     # --------------------------------------------------------
     # 3. 支撑和阻力
@@ -1182,13 +1171,24 @@ def _range_context(high, low, close, vol, end):
     # 5. 交易区间质量硬过滤
     # --------------------------------------------------------
 
-    range_quality = bool(
+    opens_near_range = bool(
+        support * (1 - P["support_tolerance"]) <= opening_level
+        <= resistance * (1 + P["resistance_tolerance"])
+    )
+    below_support = close[range_start:end] < support * (1 - P["support_tolerance"])
+    break_days = P["range_support_break_days"]
+    support_held = not np.any(
+        np.convolve(below_support.astype(int), np.ones(break_days, dtype=int), mode="valid")
+        >= break_days
+    )
+    base_quality = bool(
         in_range
+        and opens_near_range
+        and support_held
+        and decline_days >= P["decline_min_days"]
         and range_days >= P["range_min_days"]
         and range_height_pct
         <= P["range_max_height_pct"]
-        and support_touches
-        >= P["support_min_touches"]
         and resistance_touches
         >= P["resistance_min_touches"]
         and -P["max_prior_drawdown_pct"]
@@ -1212,7 +1212,9 @@ def _range_context(high, low, close, vol, end):
         resistance_touches,
         level_distance_pct,
         volume_contraction,
-        range_quality,
+        opens_near_range,
+        support_held,
+        base_quality,
     )
 
 
@@ -1249,11 +1251,16 @@ def detect_structure(df):
             "历史K线数量不足"
         )
 
+    dates = None
+    if "date" in df:
+        index = pd.DatetimeIndex(pd.to_datetime(df["date"], errors="coerce"))
+        if not index.hasnans and index.is_monotonic_increasing:
+            dates = index
     ranges = {}
 
     def range_at(end):
         if end not in ranges:
-            ranges[end] = _range_context(high, low, close, vol, end)
+            ranges[end] = _range_context(high, low, close, vol, end, dates)
         return ranges[end]
 
     spread = np.maximum(high - low, 1e-9)
@@ -1291,7 +1298,7 @@ def detect_structure(df):
         if ref_volume <= 0 or vol[i] < ref_volume * P["sos_min_volume_ratio"]:
             continue
         candidate = range_at(i)
-        if not candidate.range_quality:
+        if not candidate.sos_range_quality:
             continue
         level = candidate.resistance
         breakout_min = level * (1 + P["sos_min_breakout_pct"] / 100)
@@ -1304,6 +1311,10 @@ def detect_structure(df):
             break
 
     # Spring 和 SOS 各用触发日前的边界；主区间优先展示 Spring 的区间。
+    selected_range = spring_range or sos_range or range_at(n)
+    using_sos_range = spring_range is None and sos_range is not None
+    min_support_touches = P["sos_support_min_touches" if using_sos_range else "support_min_touches"]
+    range_quality = selected_range.sos_range_quality if using_sos_range else selected_range.range_quality
     (
         range_start,
         range_days,
@@ -1319,8 +1330,10 @@ def detect_structure(df):
         resistance_touches,
         level_distance_pct,
         volume_contraction,
-        range_quality,
-    ) = spring_range or sos_range or range_at(n)
+        opens_near_range,
+        support_held,
+        _,
+    ) = selected_range
 
     # 7. Test
     if spring_idx is not None:
@@ -1515,6 +1528,13 @@ def detect_structure(df):
             "未识别到合格交易区间"
         )
 
+    if in_range and not opens_near_range:
+        reasons.append("区间起点未进入后续支撑阻力带")
+    if in_range and not support_held:
+        reasons.append("区间内连续收盘跌破支撑容差")
+    if decline_days < P["decline_min_days"]:
+        reasons.append("区间前最近高点至区间起点时间不足")
+
     if drawdown_pct > -P["min_prior_drawdown_pct"]:
         reasons.append(
             "前期下跌不足(跌幅过小)"
@@ -1525,7 +1545,7 @@ def detect_structure(df):
             "前期下跌过深(超跌)"
         )
 
-    if support_touches < P["support_min_touches"]:
+    if support_touches < min_support_touches:
         reasons.append(
             "支撑触点不足"
         )
