@@ -20,6 +20,7 @@ A股 Wyckoff 早期吸筹机会筛选器 4.1
 """
 
 import argparse
+import csv
 import logging
 import os
 import sys
@@ -2821,6 +2822,13 @@ def main():
             print(f"K线图生成：{count} 张，目录：{chart_dir}")
         else:
             print("没有生成候选 K 线图。")
+
+    codes_and_names = pd.concat([frame[["code", "name"]] for _, frame in frames])
+    codes_and_names = codes_and_names.drop_duplicates("code")
+    print("\n--- 股票代码,股票名称 ---")
+    csv.writer(sys.stdout, lineterminator="\n").writerows(
+        codes_and_names.itertuples(index=False, name=None)
+    )
 
 
 if __name__ == "__main__":
