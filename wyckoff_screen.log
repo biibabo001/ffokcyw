@@ -121,3 +121,13 @@ Traceback (most recent call last):
   File "D:\dev\wyckoff\wyckoff_screen.py", line 1727, in detect_structure
     lps_valid
 NameError: name 'lps_valid' is not defined
+2026-11-26 19:10:21,350 WARNING matplotlib未安装，无法绘图
+2026-11-26 19:10:21,350 WARNING matplotlib未安装，无法绘图
+2026-11-26 19:10:21,351 WARNING matplotlib未安装，无法绘图
+2026-11-26 19:10:21,351 WARNING matplotlib未安装，无法绘图
+2026-11-26 19:10:21,351 WARNING matplotlib未安装，无法绘图
+2026-11-26 19:10:21,351 WARNING matplotlib未安装，无法绘图
+2026-11-26 19:10:21,351 WARNING matplotlib未安装，无法绘图
+2026-11-26 19:10:21,351 WARNING matplotlib未安装，无法绘图
+2026-11-26 19:10:21,351 WARNING matplotlib未安装，无法绘图
+2026-11-26 19:10:21,352 WARNING matplotlib未安装，无法绘图
